@@ -1,0 +1,61 @@
+
+Copyright (C) 2012-2013 ROSA Laboratory
+All rights reserved.
+
+
+RELEASE INFORMATION
+
+Project:           ABI Dumper
+Version:           0.95
+Date:              2013-05-24
+
+
+This file explains how to install and setup environment
+for the tool in your computer.
+
+
+Content:
+
+   1. Requirements for Linux and FreeBSD
+   2. Configuring and Installing
+   3. Running the Tool
+
+
+1. REQUIREMENTS FOR LINUX AND FREEBSD
+=====================================
+
+   1. Elfutils (eu-readelf)
+   2. Perl 5 (5.8 or newer)
+   3. Vtable-Dumper (1.0 or newer)
+
+
+
+4. CONFIGURING AND INSTALLING
+=============================
+
+   This command will install an abi-dumper program in the
+   PREFIX/bin system directory:
+
+     sudo perl Makefile.pl -install --prefix=PREFIX [/usr, /usr/local, ...]
+
+4.1 Update
+
+     sudo perl Makefile.pl -update --prefix=PREFIX
+
+4.2 Remove
+
+     sudo perl Makefile.pl -remove --prefix=PREFIX
+
+
+
+5. RUNNING THE TOOL
+===================
+
+   1. abi-dumper libTest.so -o ABI.dump
+      abi-dumper Module.ko.debug -o ABI.dump
+
+   2. For advanced usage, see output of --help option
+
+
+
+Enjoy!

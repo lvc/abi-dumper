@@ -1,0 +1,35 @@
+NAME:
+  ABI Dumper - a tool to dump ABI of an ELF object containing DWARF debug info
+  
+  The tool is intended to be used with ABI Compliance Checker tool for tracking
+  ABI changes of a C/C++ library or kernel module.
+
+INSTALL:
+  sudo perl Makefile.pl -install --prefix=/usr
+  
+REQUIRES:
+  Elfutils (eu-readelf)
+  Perl 5 (5.8 or newer)
+  Vtable Dumper (1.0 or newer, https://github.com/lvc/vtable-dumper)
+
+USAGE:
+  abi-dumper libTest.so -o ABI.dump
+  abi-dumper Module.ko.debug
+  
+EXAMPLES:
+  abi-dumper lib/libssh.so.3
+  abi-dumper drm/nouveau/nouveau.ko.debug
+  
+NOTE:
+  Input objects should be compiled with -g additional option to contain DWARF debug info.
+  
+ABI CHECK:
+  abi-dumper libTest.so.0 -o ABIv0.dump
+  abi-dumper libTest.so.1 -o ABIv1.dump
+  abi-compliance-checker -l libTest -old ABIv0.dump -new ABIv1.dump
+  
+COMPATIBILITY:
+  ABI Compliance Checker >= 1.99 (https://github.com/lvc/abi-compliance-checker)
+
+ADV. USAGE:
+  For advanced usage, see output of --help option.
