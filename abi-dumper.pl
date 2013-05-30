@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.95
+# ABI Dumper 0.96
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013 ROSA Laboratory
@@ -42,7 +42,7 @@ use File::Temp qw(tempdir);
 use Cwd qw(abs_path cwd realpath);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.95";
+my $TOOL_VERSION = "0.96";
 my $ABI_DUMP_VERSION = "3.0";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -691,8 +691,8 @@ sub read_DWARF_Info($)
         {
             my ($Attr, $Val) = ($1, $2);
             
-            if($Val=~/\A\s*\(ref\d+\)\s*\[\s*(\w+)\]/)
-            {
+            if($Val=~/\A\s*\(ref[^()]*\)\s*\[\s*(\w+)\]/)
+            { # ref4, ref_udata, ref_addr, etc.
                 $Val = hex($1);
             }
             elsif($Attr eq "name")
@@ -750,6 +750,13 @@ sub read_DWARF_Info($)
                 
                 if(not defined $CUnit_F) {
                     $CUnit_F = $ID;
+                }
+            }
+            
+            if($Kind eq "partial_unit")
+            { # support for dwz
+                if($Attr eq "stmt_list") {
+                    $CUnit = $Val;
                 }
             }
         }
@@ -1033,6 +1040,48 @@ sub read_ABI()
         {
             if(defined $TypeType{$Kind}) {
                 getTypeInfo($ID);
+            }
+        }
+    }
+    
+    my %TName_Tids = ();
+    my %Incomplete = ();
+    
+    foreach my $Tid (sort {int($a) <=> int($b)} keys(%TypeInfo))
+    {
+        if(not defined $SpecElem{$Tid}
+        and not defined $TName_Tids{$TypeInfo{$Tid}{"Name"}})
+        {
+            if(not defined $TypeInfo{$Tid}{"Memb"})
+            {
+                if($TypeInfo{$Tid}{"Type"}=~/Struct|Class|Union|Enum/)
+                {
+                    $Incomplete{$Tid} = 1;
+                }
+            }
+        }
+        
+        $TName_Tids{$TypeInfo{$Tid}{"Name"}}{$Tid} = 1;
+    }
+    
+    foreach my $Tid (sort {int($a) <=> int($b)} keys(%Incomplete))
+    {
+        my $Name = $TypeInfo{$Tid}{"Name"};
+        
+        foreach my $Tid_Adv (keys(%{$TName_Tids{$Name}}))
+        {
+            if($Tid_Adv!=$Tid)
+            {
+                if(defined $SpecElem{$Tid_Adv})
+                {
+                    foreach my $Attr (keys(%{$TypeInfo{$Tid_Adv}}))
+                    {
+                        if(not defined $TypeInfo{$Tid}{$Attr}) {
+                            $TypeInfo{$Tid}{$Attr} = $TypeInfo{$Tid_Adv}{$Attr};
+                        }
+                    }
+                    last;
+                }
             }
         }
     }
@@ -1385,7 +1434,7 @@ sub getTypeInfo($)
     {
         if($DWARF_Info_Kind{$N} eq "subprogram")
         { # local code
-            # template instances are declared in the subprogram (constructor)
+          # template instances are declared in the subprogram (constructor)
             my $Tmpl = 0;
             if(my $ObjP = $DWARF_Info{$N}{"object_pointer"})
             {
@@ -1513,7 +1562,15 @@ sub getTypeInfo($)
     {
         $TInfo{"Name"} = $Name;
         
-        if(my $NS = $NameSpace{$ID})
+        my $NS = $NameSpace{$ID};
+        if(not $NS)
+        {
+            if(my $Sp = $DWARF_Info{$ID}{"specification"}) {
+                $NS = $NameSpace{$Sp};
+            }
+        }
+        
+        if($NS)
         {
             if($DWARF_Info_Kind{$NS} eq "namespace")
             {
@@ -1521,7 +1578,8 @@ sub getTypeInfo($)
                 my $ID_ = $ID;
                 my @NSs = ();
                 
-                while($NS = $NameSpace{$ID_})
+                while($NS = $NameSpace{$ID_}
+                or $NS = $NameSpace{$DWARF_Info{$ID_}{"specification"}})
                 {
                     push(@NSs, $DWARF_Info{$NS}{"name"});
                     $ID_ = $NS;
@@ -1687,29 +1745,7 @@ sub getTypeInfo($)
         }
     }
     
-    foreach my $Attr (keys(%TInfo)) {
-        $TypeInfo{$ID}{$Attr} = $TInfo{$Attr};
-    }
-    
-    if(my $BASE_ID = $DWARF_Info{$ID}{"specification"})
-    {
-        foreach my $Attr (keys(%{$TypeInfo{$BASE_ID}}))
-        {
-            if($Attr ne "Type") {
-                $TypeInfo{$ID}{$Attr} = $TypeInfo{$BASE_ID}{$Attr};
-            }
-        }
-        
-        foreach my $Attr (keys(%{$TypeInfo{$ID}})) {
-            $TypeInfo{$BASE_ID}{$Attr} = $TypeInfo{$ID}{$Attr};
-        }
-        
-        $TypeSpec{$ID} = $BASE_ID;
-        
-        $ID = $BASE_ID;
-    }
-    
-    if(not $TypeInfo{$ID}{"Name"})
+    if(not $TInfo{"Name"})
     {
         my $ID_ = $ID;
         my $BaseID = undef;
@@ -1737,77 +1773,96 @@ sub getTypeInfo($)
             $ID_ = $BaseID;
         }
         
-        $TypeInfo{$ID}{"Name"} = $Name;
+        $TInfo{"Name"} = $Name;
         
         if($TInfo{"Type"} eq "Array")
         {
             if(my $Count = $ArrayCount{$ID})
             {
-                $TypeInfo{$ID}{"Name"} .= "[".$Count."]";
-                if(my $BSize = $TypeInfo{$TypeInfo{$ID}{"BaseType"}}{"Size"})
+                $TInfo{"Name"} .= "[".$Count."]";
+                if(my $BSize = $TypeInfo{$TInfo{"BaseType"}}{"Size"})
                 {
                     if(my $Size = $Count*$BSize)
                     {
-                        $TypeInfo{$ID}{"Size"} = "$Size";
+                        $TInfo{"Size"} = "$Size";
                     }
                 }
             }
             else
             {
-                $TypeInfo{$ID}{"Name"} .= "[]";
-                $TypeInfo{$ID}{"Size"} = $SYS_WORD;
+                $TInfo{"Name"} .= "[]";
+                $TInfo{"Size"} = $SYS_WORD;
             }
         }
     }
     
-    if(my $Bid = $TypeInfo{$ID}{"BaseType"})
+    if(my $Bid = $TInfo{"BaseType"})
     {
-        if(not $TypeInfo{$ID}{"Size"}
+        if(not $TInfo{"Size"}
         and $TypeInfo{$Bid}{"Size"}) {
-            $TypeInfo{$ID}{"Size"} = $TypeInfo{$Bid}{"Size"};
+            $TInfo{"Size"} = $TypeInfo{$Bid}{"Size"};
         }
     }
-    $TypeInfo{$ID}{"Name"} = formatName($TypeInfo{$ID}{"Name"}, "T"); # simpleName()
+    $TInfo{"Name"} = formatName($TInfo{"Name"}, "T"); # simpleName()
     
-    if($TypeInfo{$ID}{"Name"}=~/>\Z/)
+    if($TInfo{"Name"}=~/>\Z/)
     {
-        my ($Short, @TParams) = get_TParams($TypeInfo{$ID}{"Name"});
+        my ($Short, @TParams) = get_TParams($TInfo{"Name"});
         
         if(@TParams)
         {
-            delete($TypeInfo{$ID}{"TParam"});
+            delete($TInfo{"TParam"});
             foreach my $Pos (0 .. $#TParams) {
-                $TypeInfo{$ID}{"TParam"}{$Pos}{"name"} = $TParams[$Pos];
+                $TInfo{"TParam"}{$Pos}{"name"} = $TParams[$Pos];
             }
-            $TypeInfo{$ID}{"Name"} = formatName($Short."<".join(", ", @TParams).">", "T");
+            $TInfo{"Name"} = formatName($Short."<".join(", ", @TParams).">", "T");
         }
     }
     
-    if(not $TypeInfo{$ID}{"Name"})
+    if(not $TInfo{"Name"})
     {
         if($TInfo{"Type"}=~/\A(Struct|Enum|Union)\Z/)
         {
             if($TInfo{"Header"}) {
-                $TypeInfo{$ID}{"Name"} = "anon-".lc($TInfo{"Type"})."-".$TInfo{"Header"}."-".$TInfo{"Line"};
+                $TInfo{"Name"} = "anon-".lc($TInfo{"Type"})."-".$TInfo{"Header"}."-".$TInfo{"Line"};
             }
             else {
-                $TypeInfo{$ID}{"Name"} = "anon-".lc($TInfo{"Type"})."-".$TInfo{"Source"}."-".$TInfo{"SourceLine"};
+                $TInfo{"Name"} = "anon-".lc($TInfo{"Type"})."-".$TInfo{"Source"}."-".$TInfo{"SourceLine"};
             }
         }
     }
     
-    if(not defined $TName_Tid{$TypeInfo{$ID}{"Name"}}
-    or $ID<$TName_Tid{$TypeInfo{$ID}{"Name"}})
+    if(not defined $TName_Tid{$TInfo{"Name"}}
+    or $ID<$TName_Tid{$TInfo{"Name"}})
     {
-        $TName_Tid{$TypeInfo{$ID}{"Name"}} = "$ID";
+        $TName_Tid{$TInfo{"Name"}} = "$ID";
     }
     
-    if(defined $TypeInfo{$ID}{"Source"})
+    if(defined $TInfo{"Source"})
     {
-        if(not defined $TypeInfo{$ID}{"Header"}) {
-            $TypeInfo{$ID}{"Line"} = $TypeInfo{$ID}{"SourceLine"};
+        if(not defined $TInfo{"Header"}) {
+            $TInfo{"Line"} = $TInfo{"SourceLine"};
         }
-        delete($TypeInfo{$ID}{"SourceLine"});
+        delete($TInfo{"SourceLine"});
+    }
+    
+    foreach my $Attr (keys(%TInfo)) {
+        $TypeInfo{$ID}{$Attr} = $TInfo{$Attr};
+    }
+    if(my $BASE_ID = $DWARF_Info{$ID}{"specification"})
+    {
+        foreach my $Attr (keys(%{$TypeInfo{$BASE_ID}}))
+        {
+            if($Attr ne "Type") {
+                $TypeInfo{$ID}{$Attr} = $TypeInfo{$BASE_ID}{$Attr};
+            }
+        }
+        
+        foreach my $Attr (keys(%{$TypeInfo{$ID}})) {
+            $TypeInfo{$BASE_ID}{$Attr} = $TypeInfo{$ID}{$Attr};
+        }
+        
+        $TypeSpec{$ID} = $BASE_ID;
     }
 }
 
@@ -2574,6 +2629,16 @@ sub register_TypeUsage($)
     
     if($TInfo{"Type"})
     {
+        if(my $NS = $TInfo{"NameSpace"})
+        {
+            if(my $NSTid = searchTypeID($NS))
+            {
+                if(my $FNSTid = getFirst($NSTid)) {
+                    register_TypeUsage($FNSTid);
+                }
+            }
+        }
+        
         if($TInfo{"Type"}=~/\A(Struct|Union|Class|FuncPtr|Func|MethodPtr|FieldPtr|Enum)\Z/)
         {
             $UsedType{$TypeId} = 1;
@@ -2906,16 +2971,16 @@ sub init_Registers()
         %RegName = (
         # integer registers
         # 32-bit
-            " 0"=>"r0",
-            " 1"=>"r1",
-            " 2"=>"r2",
-            " 3"=>"r3",
-            " 4"=>"r4",
-            " 5"=>"r5",
-            " 6"=>"r6",
-            " 7"=>"r7",
-            " 8"=>"r8",
-            " 9"=>"r9",
+            "0"=>"r0",
+            "1"=>"r1",
+            "2"=>"r2",
+            "3"=>"r3",
+            "4"=>"r4",
+            "5"=>"r5",
+            "6"=>"r6",
+            "7"=>"r7",
+            "8"=>"r8",
+            "9"=>"r9",
             "10"=>"r10",
             "11"=>"r11",
             "12"=>"r12",
