@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.96
+# ABI Dumper 0.97
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013 ROSA Laboratory
@@ -19,7 +19,7 @@
 #
 # COMPATIBILITY
 # =============
-#  ABI Compliance Checker >= 1.99
+#  ABI Compliance Checker >= 1.99.1
 #
 #
 # This program is free software: you can redistribute it and/or modify
@@ -40,10 +40,11 @@ Getopt::Long::Configure ("posix_default", "no_ignore_case", "permute");
 use File::Path qw(mkpath rmtree);
 use File::Temp qw(tempdir);
 use Cwd qw(abs_path cwd realpath);
+use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.96";
-my $ABI_DUMP_VERSION = "3.0";
+my $TOOL_VERSION = "0.97";
+my $ABI_DUMP_VERSION = "3.1";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
 
@@ -64,7 +65,9 @@ my %ERROR_CODE = (
     # Cannot access input files
     "Access_Error"=>4,
     # Cannot find a module
-    "Module_Error"=>9
+    "Module_Error"=>9,
+    # No debug-info
+    "No_DWARF"=>10
 );
 
 my $ShortUsage = "ABI Dumper $TOOL_VERSION
@@ -187,7 +190,6 @@ my %Cache;
 my %DWARF_Info;
 my %DWARF_Info_Kind;
 my %DWARF_Info_NS;
-my %DWARF_Info_ID;
 
 # Output
 my %SymbolInfo;
@@ -211,6 +213,7 @@ my %SourceFile;
 my %DebugLoc;
 my %CompUnit;
 my %TName_Tid;
+my %TName_Tids;
 my %RegName;
 
 my $STDCXX_TARGET = 0;
@@ -558,6 +561,13 @@ sub read_DWARF_Info($)
         exitStatus("Not_Found", "can't find \"$Readelf\" command");
     }
     
+    my $Sect = `$Readelf -S \"$Path\" 2>\"$TMP_DIR/error\"`;
+    
+    if($Sect!~/\.debug_info/)
+    { # No DWARF info
+        return 0;
+    }
+    
     my $ExtraPath = "";
     
     if($ExtraInfo) {
@@ -589,7 +599,8 @@ sub read_DWARF_Info($)
     
     $SYS_ARCH = $Header{"Machine"};
     
-    if($SYS_ARCH=~/80\d86/)
+    if($SYS_ARCH=~/80\d86/
+    or $SYS_ARCH=~/i\d86/)
     { # i386, i586, etc.
         $SYS_ARCH = "x86";
     }
@@ -607,14 +618,6 @@ sub read_DWARF_Info($)
     else {
         open(SRC, "$Readelf --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" |");
     }
-    
-    if(my $Error = readFile("$TMP_DIR/error"))
-    {
-        if($Error=~/No DWARF/i) {
-            return 0;
-        }
-    }
-    
     
     my $Offset = undef;
     
@@ -678,6 +681,16 @@ sub read_DWARF_Info($)
         open(INFO, "$Readelf --debug-dump=info \"$Path\" 2>\"$TMP_DIR/error\" |");
     }
     
+    my %TypeUnit = ();
+    my %Post_Change = ();
+    my $TypeUnit_Sign = undef;
+    my $TypeUnit_Offset = undef;
+    my $Type_Offset = undef;
+    
+    my $Shift_Enabled = 1;
+    my $ID_Shift = undef;
+    
+    
     my $CUnit = undef;
     my $CUnit_F = undef;
     
@@ -685,11 +698,38 @@ sub read_DWARF_Info($)
     my $Kind = undef;
     my $NS = undef;
     
+    my $MAX_ID = undef;
+    
+    my %Shift = map {$_=>1} (
+        "specification",
+        "type",
+        "sibling",
+        "object_pointer",
+        "containing_type",
+        "abstract_origin",
+        "import",
+        "signature"
+    );
+    
     while(<INFO>)
     {
         if($ID and /\A\s*(\w+)\s*(.+?)\s*\Z/)
         {
             my ($Attr, $Val) = ($1, $2);
+            
+            if($Attr eq "Type")
+            {
+                if(/Type\s+signature:\s*0x(\w+)/) {
+                    $TypeUnit_Sign = $1;
+                }
+                if(/Type\s+offset:\s*0x(\w+)/) {
+                    $Type_Offset = hex($1);
+                }
+                if(/Type\s+unit\s+at\s+offset\s+(\d+)/) {
+                    $TypeUnit_Offset = $1;
+                }
+                next;
+            }
             
             if($Val=~/\A\s*\(ref[^()]*\)\s*\[\s*(\w+)\]/)
             { # ref4, ref_udata, ref_addr, etc.
@@ -699,30 +739,40 @@ sub read_DWARF_Info($)
             {
                 $Val=~s/\A\((strp|string)\)\s*\"(.*)\"\Z/$2/;
             }
-            elsif(index($Attr, "_linkage_name")!=-1)
+            elsif(index($Attr, "linkage_name")!=-1)
             {
                 $Val=~s/\A\(strp\)\s*\"(.*)\"\Z/$1/;
                 $Attr = "linkage_name";
             }
             elsif(index($Attr, "location")!=-1)
             {
-                if($Val=~/ (-?\d+)\Z/) {
-                    $Val = $1;
+                if($Val=~/\A\(\w+\)\s*(-?)(\w+)\Z/)
+                { # (data1) 1c
+                    $Val = hex($2);
+                    if($1) {
+                        $Val = -$Val;
+                    }
                 }
                 else
                 {
-                    if($Attr eq "location"
-                    and $Kind eq "formal_parameter")
+                    if($Val=~/ (-?\d+)\Z/) {
+                        $Val = $1;
+                    }
+                    else
                     {
-                        if($Val=~/location list\s+\[\s*(\w+)\]\Z/)
+                        if($Attr eq "location"
+                        and $Kind eq "formal_parameter")
                         {
-                            $Attr = "location_list";
-                            $Val = $1;
-                        }
-                        elsif($Val=~/ reg(\d+)\Z/)
-                        {
-                            $Attr = "register";
-                            $Val = $1;
+                            if($Val=~/location list\s+\[\s*(\w+)\]\Z/)
+                            {
+                                $Attr = "location_list";
+                                $Val = $1;
+                            }
+                            elsif($Val=~/ reg(\d+)\Z/)
+                            {
+                                $Attr = "register";
+                                $Val = $1;
+                            }
                         }
                     }
                 }
@@ -738,6 +788,21 @@ sub read_DWARF_Info($)
             else
             {
                 $Val=~s/\A\(\w+\)\s*(.*?)\Z/$1/;
+                if($Val=~/{(.+)}/)
+                {
+                    $Val = $1;
+                    $Post_Change{$ID} = 1;
+                }
+            }
+            
+            if($Shift_Enabled and $ID_Shift)
+            {
+                if(defined $Shift{$Attr}
+                and not $Post_Change{$ID}) {
+                    $Val += $ID_Shift;
+                }
+                
+                $DWARF_Info{$ID}{"rID"} = $ID-$ID_Shift;
             }
             
             $DWARF_Info{$ID}{$Attr} = "$Val";
@@ -753,6 +818,13 @@ sub read_DWARF_Info($)
                 }
             }
             
+            if($Kind eq "type_unit")
+            {
+                if($Attr eq "stmt_list") {
+                    $CUnit = $Val;
+                }
+            }
+            
             if($Kind eq "partial_unit")
             { # support for dwz
                 if($Attr eq "stmt_list") {
@@ -763,10 +835,41 @@ sub read_DWARF_Info($)
         elsif(/\A\s{0,4}\[\s*(\w+)\](\s*)(\w+)/)
         {
             $ID = hex($1);
-            $DWARF_Info_ID{$ID} = $1;
-            
             $NS = $2;
             $Kind = $3;
+            
+            if($Shift_Enabled)
+            {
+                if($Kind eq "type_unit")
+                {
+                    if(not defined $ID_Shift)
+                    {
+                        if($ID_Shift<=$MAX_ID) {
+                            $ID_Shift = $MAX_ID;
+                        }
+                        else {
+                            $ID_Shift = 0;
+                        }
+                    }
+                }
+                
+                if($ID_Shift) {
+                    $ID += $ID_Shift;
+                }
+            }
+            
+            if(defined $TypeUnit_Sign)
+            {
+                if($Kind ne "type_unit"
+                and $Kind ne "namespace")
+                {
+                    if($TypeUnit_Offset+$Type_Offset+$ID_Shift==$ID)
+                    {
+                        $TypeUnit{$TypeUnit_Sign} = "$ID";
+                        $TypeUnit_Sign = undef;
+                    }
+                }
+            }
             
             $DWARF_Info_NS{$ID} = length($NS);
             $DWARF_Info_Kind{$ID} = $Kind;
@@ -777,8 +880,9 @@ sub read_DWARF_Info($)
                 $CompUnit{$ID} = $CUnit;
             }
             
-            #$DWARF_Info{$ID}{"rid"} = $1;
-            #$DWARF_Info{$ID}{"id"} = $ID;
+            if(not defined $ID_Shift) {
+                $MAX_ID = $ID;
+            }
         }
         elsif(not defined $SYS_WORD
         and /Address\s*size:\s*(\d+)/i)
@@ -787,6 +891,22 @@ sub read_DWARF_Info($)
         }
     }
     close(INFO);
+    
+    foreach my $ID (keys(%Post_Change))
+    {
+        if(my $Type = $DWARF_Info{$ID}{"type"})
+        {
+            if(my $To = $TypeUnit{$Type}) {
+                $DWARF_Info{$ID}{"type"} = $To;
+            }
+        }
+        if(my $Signature = $DWARF_Info{$ID}{"signature"})
+        {
+            if(my $To = $TypeUnit{$Signature}) {
+                $DWARF_Info{$ID}{"signature"} = $To;
+            }
+        }
+    }
     
     if(defined $CUnit_F)
     {
@@ -914,22 +1034,22 @@ sub dump_ABI()
         open(DUMP, ">", $OutputDump) || die ("can't open file \'$OutputDump\': $!\n");
         print DUMP $ABI_DUMP;
         close(DUMP);
+        
+        printMsg("INFO", "The object ABI has been dumped to:\n  $OutputDump");
     }
 }
 
 sub read_ABI()
 {
     my %CurID = ();
-    my $Pos = 0;
-    my $Inh = 0;
     
     foreach my $ID (sort {int($a) <=> int($b)} keys(%DWARF_Info))
     {
         $ID = "$ID";
         
         my $Kind = $DWARF_Info_Kind{$ID};
-        
         my $NS = $DWARF_Info_NS{$ID};
+        my $Scope = $CurID{$NS-2};
         
         if($Kind=~/(struct|structure|class|union|enumeration|subroutine|array)_type/
         or $Kind eq "typedef"
@@ -942,22 +1062,19 @@ sub read_ABI()
             if($Kind ne "variable"
             and $Kind ne "typedef")
             {
-                $Pos = 0;
-                $Inh = 0;
-                
                 $CurID{$NS} = $ID;
             }
             
-            if(my $CID = $CurID{$NS-2})
+            if($Scope)
             {
-                $NameSpace{$ID} = $CID;
+                $NameSpace{$ID} = $Scope;
                 if($Kind eq "subprogram"
                 or $Kind eq "variable")
                 {
-                    if($DWARF_Info_Kind{$CID}=~/class|struct/)
+                    if($DWARF_Info_Kind{$Scope}=~/class|struct/)
                     {
-                        $ClassMethods{$CID}{$ID} = 1;
-                        if(my $Sp = $DWARF_Info{$CID}{"specification"}) {
+                        $ClassMethods{$Scope}{$ID} = 1;
+                        if(my $Sp = $DWARF_Info{$Scope}{"specification"}) {
                             $ClassMethods{$Sp}{$ID} = 1;
                         }
                     }
@@ -970,22 +1087,22 @@ sub read_ABI()
         }
         elsif($Kind eq "member")
         {
-            my $CID = $CurID{$NS-2};
-            if($CID) {
-                $NameSpace{$ID} = $CID;
+            if($Scope)
+            {
+                $NameSpace{$ID} = $Scope;
+                
+                if($DWARF_Info_Kind{$Scope}=~/class|struct/
+                and not defined $DWARF_Info{$ID}{"data_member_location"})
+                { # variable (global data)
+                    next;
+                }
             }
-            if($DWARF_Info_Kind{$CID}=~/class|struct/
-            and not defined $DWARF_Info{$ID}{"data_member_location"})
-            { # variable (global data)
-                next;
-            }
-            $TypeMember{$CurID{$NS-2}}{$Pos} = $ID;
-            $Pos += 1;
+            
+            $TypeMember{$Scope}{keys(%{$TypeMember{$Scope}})} = $ID;
         }
         elsif($Kind eq "enumerator")
         {
-            $TypeMember{$CurID{$NS-2}}{$Pos} = $ID;
-            $Pos += 1;
+            $TypeMember{$Scope}{keys(%{$TypeMember{$Scope}})} = $ID;
         }
         elsif($Kind eq "inheritance")
         {
@@ -996,24 +1113,21 @@ sub read_ABI()
             if(defined $DWARF_Info{$ID}{"virtuality"}) {
                 $In{"virtual"} = 1;
             }
-            $Inheritance{$CurID{$NS-2}}{$Inh} = \%In;
-            $Inh += 1;
+            $Inheritance{$Scope}{keys(%{$Inheritance{$Scope}})} = \%In;
         }
         elsif($Kind eq "formal_parameter")
         {
-            $FuncParam{$CurID{$NS-2}}{$Pos} = $ID;
-            $Pos += 1;
+            $FuncParam{$Scope}{keys(%{$FuncParam{$Scope}})} = $ID;
         }
         elsif($Kind eq "unspecified_parameters")
         {
-            $FuncParam{$CurID{$NS-2}}{$Pos} = $ID;
+            $FuncParam{$Scope}{keys(%{$FuncParam{$Scope}})} = $ID;
             $DWARF_Info{$ID}{"type"} = "-1"; # "..."
-            $Pos += 1;
         }
         elsif($Kind eq "subrange_type")
         {
             if((my $Bound = $DWARF_Info{$ID}{"upper_bound"}) ne "") {
-                $ArrayCount{$CurID{$NS-2}} = $Bound + 1;
+                $ArrayCount{$Scope} = $Bound + 1;
             }
         }
     }
@@ -1023,7 +1137,8 @@ sub read_ABI()
         "Name"=>"void",
         "Type"=>"Intrinsic"
     );
-    $TName_Tid{"void"} = "1";
+    $TName_Tid{"Intrinsic"}{"void"} = "1";
+    $TName_Tids{"Intrinsic"}{"void"}{"1"} = 1;
     $Cache{"getTypeInfo"}{"1"} = 1;
     
     # register "..." type
@@ -1031,7 +1146,8 @@ sub read_ABI()
         "Name"=>"...",
         "Type"=>"Intrinsic"
     );
-    $TName_Tid{"..."} = "-1";
+    $TName_Tid{"Intrinsic"}{"..."} = "-1";
+    $TName_Tids{"Intrinsic"}{"..."}{"-1"} = 1;
     $Cache{"getTypeInfo"}{"-1"} = 1;
     
     foreach my $ID (sort {int($a) <=> int($b)} keys(%DWARF_Info))
@@ -1044,35 +1160,61 @@ sub read_ABI()
         }
     }
     
-    my %TName_Tids = ();
+    foreach my $Tid (sort {int($a) <=> int($b)} keys(%TypeInfo))
+    {
+        my $Type = $TypeInfo{$Tid}{"Type"};
+        
+        if(not defined $TypeInfo{$Tid}{"Memb"})
+        {
+            if($Type=~/Struct|Class|Union|Enum/)
+            {
+                if(my $Signature = $DWARF_Info{$Tid}{"signature"})
+                {
+                    foreach my $Attr (keys(%{$TypeInfo{$Signature}}))
+                    {
+                        if(not defined $TypeInfo{$Tid}{$Attr}) {
+                            $TypeInfo{$Tid}{$Attr} = $TypeInfo{$Signature}{$Attr};
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
     my %Incomplete = ();
+    my %Incomplete_TN = ();
     
     foreach my $Tid (sort {int($a) <=> int($b)} keys(%TypeInfo))
     {
+        my $Name = $TypeInfo{$Tid}{"Name"};
+        my $Type = $TypeInfo{$Tid}{"Type"};
+        
         if(not defined $SpecElem{$Tid}
-        and not defined $TName_Tids{$TypeInfo{$Tid}{"Name"}})
+        and not defined $Incomplete_TN{$Type}{$Name})
         {
-            if(not defined $TypeInfo{$Tid}{"Memb"})
+            if(not defined $TypeInfo{$Tid}{"Size"})
             {
-                if($TypeInfo{$Tid}{"Type"}=~/Struct|Class|Union|Enum/)
+                if($Type=~/Struct|Class|Union|Enum/)
                 {
                     $Incomplete{$Tid} = 1;
                 }
             }
         }
         
-        $TName_Tids{$TypeInfo{$Tid}{"Name"}}{$Tid} = 1;
+        $Incomplete_TN{$Type}{$Name} = 1;
     }
     
     foreach my $Tid (sort {int($a) <=> int($b)} keys(%Incomplete))
     {
         my $Name = $TypeInfo{$Tid}{"Name"};
+        my $Type = $TypeInfo{$Tid}{"Type"};
         
-        foreach my $Tid_Adv (keys(%{$TName_Tids{$Name}}))
+        foreach my $Tid_Adv (keys(%{$TName_Tids{$Type}{$Name}}))
         {
             if($Tid_Adv!=$Tid)
             {
-                if(defined $SpecElem{$Tid_Adv})
+                if(defined $SpecElem{$Tid_Adv}
+                or defined $TypeInfo{$Tid_Adv}{"Size"})
                 {
                     foreach my $Attr (keys(%{$TypeInfo{$Tid_Adv}}))
                     {
@@ -1086,7 +1228,9 @@ sub read_ABI()
         }
     }
     
-    foreach my $Tid (keys(%TypeInfo))
+    my %Delete = ();
+    
+    foreach my $Tid (sort {int($a) <=> int($b)} keys(%TypeInfo))
     {
         if(defined $TypeInfo{$Tid}
         and $TypeInfo{$Tid}{"Type"} eq "Typedef")
@@ -1104,21 +1248,36 @@ sub read_ABI()
                     $TypeInfo{$Tid}{"Line"} = $TL;
                     
                     my $Name = $TypeInfo{$Tid}{"Name"};
+                    my $Type = $TypeInfo{$Tid}{"Type"};
                     
-                    if(not defined $TName_Tid{$Name}
-                    or $Tid<$TName_Tid{$Name}) {
-                        $TName_Tid{$Name} = $Tid;
+                    if(not defined $TName_Tid{$Type}{$Name}
+                    or $Tid<$TName_Tid{$Type}{$Name}) {
+                        $TName_Tid{$Type}{$Name} = $Tid;
                     }
+                    $TName_Tids{$Type}{$Name}{$Tid} = 1;
                     
                     if($NS) {
                         $TypeInfo{$Tid}{"NameSpace"} = $NS;
                     }
-                    
-                    delete($TName_Tid{$TypeInfo{$BTid}{"Name"}});
-                    delete($TypeInfo{$BTid});
+                    $Delete{$BTid} = 1;
                 }
             }
         }
+    }
+    
+    foreach my $Tid (keys(%Delete))
+    {
+        my $TN = $TypeInfo{$Tid}{"Name"};
+        my $TT = $TypeInfo{$Tid}{"Type"};
+        
+        delete($TName_Tid{$TT}{$TN});
+        delete($TName_Tids{$TT}{$TN}{$Tid});
+        if(my @IDs = sort {int($a) <=> int($b)} keys(%{$TName_Tids{$TT}{$TN}}))
+        { # minimal ID
+            $TName_Tid{$TT}{$TN} = $IDs[0];
+        }
+        
+        delete($TypeInfo{$Tid});
     }
     
     foreach my $ID (sort {int($a) <=> int($b)} keys(%DWARF_Info))
@@ -1127,6 +1286,61 @@ sub read_ABI()
         or $DWARF_Info_Kind{$ID} eq "variable")
         {
             getSymbolInfo($ID);
+        }
+    }
+    
+    my $MAX_ID = keys(%SymbolInfo) + 1;
+    
+    foreach my $ID (keys(%SymbolInfo))
+    {
+        # add missed c-tors
+        if($SymbolInfo{$ID}{"Constructor"})
+        {
+            if(index($SymbolInfo{$ID}{"MnglName"}, "C1E")!=-1)
+            {
+                my $nID = undef;
+                if(not defined $SymbolInfo{$ID+1}) {
+                    $nID = $ID+1;
+                }
+                else {
+                    $nID = $MAX_ID++;
+                }
+                foreach my $Attr (keys(%{$SymbolInfo{$ID}}))
+                {
+                    if(ref($SymbolInfo{$ID}{$Attr}) eq "HASH") {
+                        $SymbolInfo{$nID}{$Attr} = dclone($SymbolInfo{$ID}{$Attr});
+                    }
+                    else {
+                        $SymbolInfo{$nID}{$Attr} = $SymbolInfo{$ID}{$Attr};
+                    }
+                }
+                $SymbolInfo{$nID}{"MnglName"}=~s/C1E/C2E/;
+            }
+        }
+        
+        # add missed d-tors
+        if($SymbolInfo{$ID}{"Destructor"})
+        {
+            if(index($SymbolInfo{$ID}{"MnglName"}, "D0E")!=-1)
+            {
+                my $nID = undef;
+                if(not defined $SymbolInfo{$ID+1}) {
+                    $nID = $ID+1;
+                }
+                else {
+                    $nID = $MAX_ID++;
+                }
+                foreach my $Attr (keys(%{$SymbolInfo{$ID}}))
+                {
+                    if(ref($SymbolInfo{$ID}{$Attr}) eq "HASH") {
+                        $SymbolInfo{$nID}{$Attr} = dclone($SymbolInfo{$ID}{$Attr});
+                    }
+                    else {
+                        $SymbolInfo{$nID}{$Attr} = $SymbolInfo{$ID}{$Attr};
+                    }
+                }
+                $SymbolInfo{$nID}{"MnglName"}=~s/D0E/D2E/;
+            }
         }
     }
     
@@ -1142,6 +1356,18 @@ sub read_ABI()
                     delete($SymbolInfo{$ID});
                     next;
                 }
+            }
+        }
+        
+        if($SymbolInfo{$ID}{"Class"}
+        and not $SymbolInfo{$ID}{"Data"}
+        and not $SymbolInfo{$ID}{"Constructor"}
+        and not $SymbolInfo{$ID}{"Destructor"})
+        {
+            if(not defined $SymbolInfo{$ID}{"Param"}
+            or $SymbolInfo{$ID}{"Param"}{0}{"name"} ne "this")
+            {
+                $SymbolInfo{$ID}{"Static"} = 1;
             }
         }
         
@@ -1480,7 +1706,7 @@ sub getTypeInfo($)
     
     if(my $BaseType = $DWARF_Info{$ID}{"type"})
     {
-        $TInfo{"BaseType"} = $BaseType;
+        $TInfo{"BaseType"} = "$BaseType";
         
         if(defined $TypeType{$DWARF_Info_Kind{$BaseType}})
         {
@@ -1494,7 +1720,6 @@ sub getTypeInfo($)
             }
         }
     }
-    
     if($TInfo{"Type"} eq "Class") {
         $TInfo{"Copied"} = 1; # will be changed in getSymbolInfo()
     }
@@ -1773,7 +1998,9 @@ sub getTypeInfo($)
             $ID_ = $BaseID;
         }
         
-        $TInfo{"Name"} = $Name;
+        if($Name) {
+            $TInfo{"Name"} = $Name;
+        }
         
         if($TInfo{"Type"} eq "Array")
         {
@@ -1803,7 +2030,9 @@ sub getTypeInfo($)
             $TInfo{"Size"} = $TypeInfo{$Bid}{"Size"};
         }
     }
-    $TInfo{"Name"} = formatName($TInfo{"Name"}, "T"); # simpleName()
+    if($TInfo{"Name"}) {
+        $TInfo{"Name"} = formatName($TInfo{"Name"}, "T"); # simpleName()
+    }
     
     if($TInfo{"Name"}=~/>\Z/)
     {
@@ -1826,16 +2055,20 @@ sub getTypeInfo($)
             if($TInfo{"Header"}) {
                 $TInfo{"Name"} = "anon-".lc($TInfo{"Type"})."-".$TInfo{"Header"}."-".$TInfo{"Line"};
             }
-            else {
+            elsif($TInfo{"Source"}) {
                 $TInfo{"Name"} = "anon-".lc($TInfo{"Type"})."-".$TInfo{"Source"}."-".$TInfo{"SourceLine"};
             }
         }
     }
     
-    if(not defined $TName_Tid{$TInfo{"Name"}}
-    or $ID<$TName_Tid{$TInfo{"Name"}})
+    if($TInfo{"Name"})
     {
-        $TName_Tid{$TInfo{"Name"}} = "$ID";
+        if(not defined $TName_Tid{$TInfo{"Type"}}{$TInfo{"Name"}}
+        or $ID<$TName_Tid{$TInfo{"Type"}}{$TInfo{"Name"}})
+        {
+            $TName_Tid{$TInfo{"Type"}}{$TInfo{"Name"}} = "$ID";
+        }
+        $TName_Tids{$TInfo{"Type"}}{$TInfo{"Name"}}{$ID} = 1;
     }
     
     if(defined $TInfo{"Source"})
@@ -1849,6 +2082,7 @@ sub getTypeInfo($)
     foreach my $Attr (keys(%TInfo)) {
         $TypeInfo{$ID}{$Attr} = $TInfo{$Attr};
     }
+    
     if(my $BASE_ID = $DWARF_Info{$ID}{"specification"})
     {
         foreach my $Attr (keys(%{$TypeInfo{$BASE_ID}}))
@@ -1868,9 +2102,9 @@ sub getTypeInfo($)
 
 sub setSource($$$$)
 {
-    my ($R, $Id, $File, $Line) = @_;
+    my ($R, $ID, $File, $Line) = @_;
     
-    my $Unit = $CompUnit{$Id};
+    my $Unit = $CompUnit{$ID};
     
     if(defined $File)
     {
@@ -2050,13 +2284,6 @@ sub getSymbolInfo($)
         $MnglName = $ShortName;
     }
     
-    if(not $SInfo{"Alias"})
-    {
-        if(my $Linkage = $DWARF_Info{$ID}{"linkage_name"}) {
-            $SInfo{"Alias"} = $Linkage;
-        }
-    }
-    
     if($DWARF_Info_Kind{$ID} eq "subprogram")
     {
         if(isExternal($ID)) {
@@ -2154,6 +2381,18 @@ sub getSymbolInfo($)
         }
     }
     
+    if(not $SInfo{"Alias"}
+    and not $SInfo{"Constructor"}
+    and not $SInfo{"Destructor"})
+    {
+        if(my $Linkage = $DWARF_Info{$ID}{"linkage_name"})
+        {
+            if($Linkage ne $MnglName) {
+                $SInfo{"Alias"} = $Linkage;
+            }
+        }
+    }
+    
     if($DWARF_Info_Kind{$ID} eq "variable")
     { # global data
         $SInfo{"Data"} = 1;
@@ -2246,12 +2485,6 @@ sub getSymbolInfo($)
     
     setSource(\%SInfo, $ID, $DWARF_Info{$ID}{"decl_file"}, $DWARF_Info{$ID}{"decl_line"});
     
-    if($SInfo{"Class"}
-    and not $SInfo{"Data"})
-    {
-        $SInfo{"Static"} = 1;
-    }
-    
     my $PPos = 0;
     
     foreach my $Pos (sort {int($a) <=> int($b)} keys(%{$FuncParam{$ID}}))
@@ -2273,6 +2506,9 @@ sub getSymbolInfo($)
                 if($L=~/reg(\d+)/) {
                     $Reg = $RegName{$1};
                 }
+                elsif($L=~/fbreg\s+(-?\w+)\Z/) {
+                    $Offset = $1;
+                }
             }
         }
         
@@ -2281,12 +2517,6 @@ sub getSymbolInfo($)
         }
         
         my %PInfo = %{$DWARF_Info{$ParamId}};
-        
-        if(defined $PInfo{"artificial"})
-        { # this
-            delete($SInfo{"Static"});
-            next;
-        }
         
         if(defined $Offset) {
             $SInfo{"Param"}{$PPos}{"offset"} = $Offset;
@@ -2332,10 +2562,10 @@ sub getSymbolInfo($)
     }
 }
 
-sub getTypeIdByName($)
+sub getTypeIdByName($$)
 {
-    my $Name = $_[0];
-    return $TName_Tid{formatName($Name, "T")};
+    my ($Type, $Name) = @_;
+    return $TName_Tid{$Type}{formatName($Name, "T")};
 }
 
 sub getFirst($)
@@ -2351,40 +2581,38 @@ sub getFirst($)
     
     my $F = 0;
     
-    if(my $N = $TypeInfo{$Tid}{"Name"})
+    if(my $Name = $TypeInfo{$Tid}{"Name"})
     {
         my $Type = $TypeInfo{$Tid}{"Type"};
-        if($N=~s/\Astruct //)
-        { # search for class
+        if($Name=~s/\Astruct //)
+        { # search for class or derived types (const, *, etc.)
             $F = 1;
         }
-        foreach my $P ("", "struct ", "union ", "enum ")
-        { # class, struct, ...
-            if(defined $TName_Tid{$P.$N})
+        
+        my $FTid = undef;
+        if($F)
+        {
+            foreach my $Type ("Class", "Const", "Ref", "Pointer")
             {
-                if(my $FTid = $TName_Tid{$P.$N})
+                if($FTid = $TName_Tid{$Type}{$Name})
                 {
-                    my $Type2 = $TypeInfo{$FTid}{"Type"};
-                    if($Type eq "Typedef")
-                    {
-                        if($Type2 ne "Typedef") {
-                            next;
-                        }
-                    }
-                    elsif($Type=~/Struct|Class/)
-                    {
-                        if($Type2!~/Struct|Class/) {
-                            next;
-                        }
-                    }
-                    if($F and not $P
-                    and $FTid ne $Tid)
+                    if($FTid ne $Tid)
                     {
                         $MergedTypes{$Tid} = 1;
                     }
                     return "$FTid";
                 }
             }
+            
+            $Name = "struct ".$Name;
+        }
+        
+        if(not $FTid) {
+            $FTid = $TName_Tid{$Type}{$Name};
+        }
+        
+        if($FTid) {
+            return "$FTid";
         }
         printMsg("ERROR", "internal error (missed type id $Tid)");
     }
@@ -2394,11 +2622,30 @@ sub getFirst($)
 
 sub searchTypeID($)
 {
-    my $N = $_[0];
-    foreach my $P ("", "struct ", "union ", "enum ")
+    my $Name = $_[0];
+    
+    my %Pr = map {$_=>1} (
+        "Struct",
+        "Union",
+        "Enum"
+    );
+    
+    foreach my $Type ("Class", "Struct", "Union", "Enum", "Typedef", "Const",
+    "Volatile", "Ref", "Pointer", "FuncPtr", "MethodPtr", "FieldPtr")
     {
-        if(my $Tid = $TName_Tid{$P.$N})
+        my $Tid = $TName_Tid{$Type}{$Name};
+        
+        if(not $Tid)
         {
+            my $P = "";
+            if(defined $Pr{$Type})
+            {
+                $P = lc($Type)." ";
+            }
+            
+            $Tid = $TName_Tid{$Type}{$P.$Name}
+        }
+        if($Tid) {
             return $Tid;
         }
     }
@@ -2505,7 +2752,9 @@ sub remove_Unused()
         foreach my $Tid (keys(%TypeInfo))
         {
             my $Name = $TypeInfo{$Tid}{"Name"};
-            if($TName_Tid{$Name} ne $Tid) {
+            my $Type = $TypeInfo{$Tid}{"Type"};
+            
+            if($TName_Tid{$Type}{$Name} ne $Tid) {
                 delete($TypeInfo{$Tid});
             }
         }
@@ -2579,11 +2828,11 @@ sub register_SymbolUsage($)
         register_TypeUsage($FCid);
         $SymbolInfo{$InfoId}{"Class"} = $FCid;
         
-        if(my $ThisId = getTypeIdByName($TypeInfo{$FCid}{"Name"}."*const"))
+        if(my $ThisId = getTypeIdByName("Const", $TypeInfo{$FCid}{"Name"}."*const"))
         { # register "this" pointer
             register_TypeUsage($ThisId);
         }
-        if(my $ThisId_C = getTypeIdByName($TypeInfo{$FCid}{"Name"}." const*const"))
+        if(my $ThisId_C = getTypeIdByName("Const", $TypeInfo{$FCid}{"Name"}." const*const"))
         { # register "this" pointer (const method)
             register_TypeUsage($ThisId_C);
         }
@@ -3038,7 +3287,7 @@ sub scenario()
     }
     
     if(not $OutputDump) {
-        $OutputDump = "ABI.dump";
+        $OutputDump = "./ABI.dump";
     }
     
     if(not @ARGV) {
@@ -3066,7 +3315,7 @@ sub scenario()
     }
     
     if(not $Res) {
-        exitStatus("Access_Error", "can't find debug info in object(s)");
+        exitStatus("No_DWARF", "can't find debug info in object(s)");
     }
     
     init_Registers();
@@ -3075,6 +3324,8 @@ sub scenario()
     remove_Unused();
     
     dump_ABI();
+    
+    exit(0);
 }
 
 scenario();

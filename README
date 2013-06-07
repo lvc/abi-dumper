@@ -29,7 +29,7 @@ ABI CHECK:
   abi-compliance-checker -l libTest -old ABIv0.dump -new ABIv1.dump
   
 COMPATIBILITY:
-  ABI Compliance Checker >= 1.99 (https://github.com/lvc/abi-compliance-checker)
+  ABI Compliance Checker >= 1.99.1 (https://github.com/lvc/abi-compliance-checker)
 
 ADV. USAGE:
   For advanced usage, see output of --help option.
