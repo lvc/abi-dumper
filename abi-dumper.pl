@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.97
+# ABI Dumper 0.98
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013 ROSA Laboratory
@@ -19,7 +19,7 @@
 #
 # COMPATIBILITY
 # =============
-#  ABI Compliance Checker >= 1.99.1
+#  ABI Compliance Checker >= 1.99.7
 #
 #
 # This program is free software: you can redistribute it and/or modify
@@ -43,8 +43,8 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.97";
-my $ABI_DUMP_VERSION = "3.1";
+my $TOOL_VERSION = "0.98";
+my $ABI_DUMP_VERSION = "3.2";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
 
@@ -603,6 +603,11 @@ sub read_DWARF_Info($)
     or $SYS_ARCH=~/i\d86/)
     { # i386, i586, etc.
         $SYS_ARCH = "x86";
+    }
+    
+    if($SYS_ARCH=~/amd64/i)
+    { # amd64
+        $SYS_ARCH = "x86_64";
     }
     
     # source info
@@ -3017,7 +3022,6 @@ sub check_Completeness($)
             if($TName=~/\A(true|false|\d.*)\Z/) {
                 next;
             }
-            my $Found = 0;
             
             if(my $Tid = searchTypeID($TName)) {
                 check_TypeInfo($Tid);
