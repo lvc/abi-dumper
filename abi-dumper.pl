@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.99
+# ABI Dumper 0.99.1
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013 ROSA Laboratory
@@ -43,7 +43,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.99";
+my $TOOL_VERSION = "0.99.1";
 my $ABI_DUMP_VERSION = "3.2";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -200,8 +200,6 @@ my %Cache;
 
 # Input
 my %DWARF_Info;
-my %DWARF_Info_Kind;
-my %DWARF_Info_NS;
 
 # Output
 my %SymbolInfo;
@@ -223,7 +221,6 @@ my %LocalType;
 
 my %SourceFile;
 my %DebugLoc;
-my %CompUnit;
 my %TName_Tid;
 my %TName_Tids;
 my %RegName;
@@ -792,17 +789,22 @@ sub read_DWARF_Info($)
                 next;
             }
             
-            if($Val=~/\A\s*\(ref[^()]*\)\s*\[\s*(\w+)\]/)
+            if($Attr eq "encoding")
+            { # unused
+                next;
+            }
+            
+            if($Val=~/\A\s*\([^()]*\)\s*\[\s*(\w+)\]\s*\Z/)
             { # ref4, ref_udata, ref_addr, etc.
                 $Val = hex($1);
             }
             elsif($Attr eq "name")
             {
-                $Val=~s/\A\((strp|string)\)\s*\"(.*)\"\Z/$2/;
+                $Val=~s/\A\([^()]*\)\s*\"(.*)\"\Z/$1/;
             }
             elsif(index($Attr, "linkage_name")!=-1)
             {
-                $Val=~s/\A\(strp\)\s*\"(.*)\"\Z/$1/;
+                $Val=~s/\A\([^()]*\)\s*\"(.*)\"\Z/$1/;
                 $Attr = "linkage_name";
             }
             elsif(index($Attr, "location")!=-1)
@@ -934,13 +936,12 @@ sub read_DWARF_Info($)
                 }
             }
             
-            $DWARF_Info_NS{$ID} = length($NS);
-            $DWARF_Info_Kind{$ID} = $Kind;
+            $DWARF_Info{$ID}{"Kind"} = $Kind;
+            $DWARF_Info{$ID}{"NS"} = length($NS);
             
-            $DWARF_Info{$ID}{"kind"} = $Kind;
             
             if(defined $CUnit) {
-                $CompUnit{$ID} = $CUnit;
+                $DWARF_Info{$ID}{"CompUnit"} = $CUnit;
             }
             
             if(not defined $ID_Shift) {
@@ -977,6 +978,9 @@ sub read_DWARF_Info($)
             }
         }
     }
+    
+    %TypeUnit = ();
+    %Post_Change = ();
     
     if(defined $CUnit_F)
     {
@@ -1136,8 +1140,8 @@ sub read_ABI()
     {
         $ID = "$ID";
         
-        my $Kind = $DWARF_Info_Kind{$ID};
-        my $NS = $DWARF_Info_NS{$ID};
+        my $Kind = $DWARF_Info{$ID}{"Kind"};
+        my $NS = $DWARF_Info{$ID}{"NS"};
         my $Scope = $CurID{$NS-2};
         
         my $IsType = ($Kind=~/(struct|structure|class|union|enumeration|subroutine|array)_type/);
@@ -1162,7 +1166,7 @@ sub read_ABI()
                 if($Kind eq "subprogram"
                 or $Kind eq "variable")
                 {
-                    if($DWARF_Info_Kind{$Scope}=~/class|struct/)
+                    if($DWARF_Info{$Scope}{"Kind"}=~/class|struct/)
                     {
                         $ClassMethods{$Scope}{$ID} = 1;
                         if(my $Sp = $DWARF_Info{$Scope}{"specification"}) {
@@ -1190,7 +1194,7 @@ sub read_ABI()
             {
                 $NameSpace{$ID} = $Scope;
                 
-                if($DWARF_Info_Kind{$Scope}=~/class|struct/
+                if($DWARF_Info{$Scope}{"Kind"}=~/class|struct/
                 and not defined $DWARF_Info{$ID}{"data_member_location"})
                 { # variable (global data)
                     next;
@@ -1251,7 +1255,7 @@ sub read_ABI()
     
     foreach my $ID (sort {int($a) <=> int($b)} keys(%DWARF_Info))
     {
-        if(my $Kind = $DWARF_Info_Kind{$ID})
+        if(my $Kind = $DWARF_Info{$ID}{"Kind"})
         {
             if(defined $TypeType{$Kind}) {
                 getTypeInfo($ID);
@@ -1385,8 +1389,8 @@ sub read_ABI()
     
     foreach my $ID (sort {int($a) <=> int($b)} keys(%DWARF_Info))
     {
-        if($DWARF_Info_Kind{$ID} eq "subprogram"
-        or $DWARF_Info_Kind{$ID} eq "variable")
+        if($DWARF_Info{$ID}{"Kind"} eq "subprogram"
+        or $DWARF_Info{$ID}{"Kind"} eq "variable")
         {
             getSymbolInfo($ID);
         }
@@ -1418,15 +1422,15 @@ sub read_ABI()
         # add missed d-tors
         if($SymbolInfo{$ID}{"Destructor"})
         {
-            if($SymbolInfo{$ID}{"MnglName"}=~/(D[0-2]E).+/)
+            if($SymbolInfo{$ID}{"MnglName"}=~/(D[0-2])([EI]).+/)
             {
-                my $Kind = $1;
-                foreach ("D0E", "D1E", "D2E")
+                my ($K1, $K2) = ($1, $2);
+                foreach ("D0", "D1", "D2")
                 {
-                    if($Kind ne $_)
+                    if($K1 ne $_)
                     {
                         my $Name = $SymbolInfo{$ID}{"MnglName"};
-                        $Name=~s/$Kind/$_/;
+                        $Name=~s/$K1$K2/$_$K2/;
                         
                         if(not defined $Mangled_ID{$Name}) {
                             cloneSymbol($ID, $Name);
@@ -1779,7 +1783,7 @@ sub get_TParams($)
 sub getTypeInfo($)
 {
     my $ID = $_[0];
-    my $Kind = $DWARF_Info_Kind{$ID};
+    my $Kind = $DWARF_Info{$ID}{"Kind"};
     
     if(defined $Cache{"getTypeInfo"}{$ID}) {
         return;
@@ -1787,7 +1791,7 @@ sub getTypeInfo($)
     
     if(my $N = $NameSpace{$ID})
     {
-        if($DWARF_Info_Kind{$N} eq "subprogram")
+        if($DWARF_Info{$N}{"Kind"} eq "subprogram")
         { # local code
           # template instances are declared in the subprogram (constructor)
             my $Tmpl = 0;
@@ -1807,7 +1811,7 @@ sub getTypeInfo($)
                 $LocalType{$ID} = 1;
             }
         }
-        elsif($DWARF_Info_Kind{$N} eq "lexical_block")
+        elsif($DWARF_Info{$N}{"Kind"} eq "lexical_block")
         { # local code
             return;
         }
@@ -1821,7 +1825,7 @@ sub getTypeInfo($)
     
     if(not $TInfo{"Type"})
     {
-        if($DWARF_Info_Kind{$ID} eq "subroutine_type") {
+        if($DWARF_Info{$ID}{"Kind"} eq "subroutine_type") {
             $TInfo{"Type"} = "Func";
         }
     }
@@ -1837,7 +1841,7 @@ sub getTypeInfo($)
     {
         $TInfo{"BaseType"} = "$BaseType";
         
-        if(defined $TypeType{$DWARF_Info_Kind{$BaseType}})
+        if(defined $TypeType{$DWARF_Info{$BaseType}{"Kind"}})
         {
             getTypeInfo($TInfo{"BaseType"});
             
@@ -1926,7 +1930,7 @@ sub getTypeInfo($)
         
         if($NS)
         {
-            if($DWARF_Info_Kind{$NS} eq "namespace")
+            if($DWARF_Info{$NS}{"Kind"} eq "namespace")
             {
                 if(my $NS_F = completeNS($ID))
                 {
@@ -1934,8 +1938,8 @@ sub getTypeInfo($)
                     $TInfo{"Name"} = $TInfo{"NameSpace"}."::".$TInfo{"Name"};
                 }
             }
-            elsif($DWARF_Info_Kind{$NS} eq "class_type"
-            or $DWARF_Info_Kind{$NS} eq "structure_type")
+            elsif($DWARF_Info{$NS}{"Kind"} eq "class_type"
+            or $DWARF_Info{$NS}{"Kind"} eq "structure_type")
             { # class
                 getTypeInfo($NS);
                 
@@ -1959,14 +1963,14 @@ sub getTypeInfo($)
     
     if($TInfo{"Type"} eq "Pointer")
     {
-        if($DWARF_Info_Kind{$TInfo{"BaseType"}} eq "subroutine_type")
+        if($DWARF_Info{$TInfo{"BaseType"}}{"Kind"} eq "subroutine_type")
         {
             init_FuncType(\%TInfo, $TInfo{"BaseType"}, "FuncPtr");
         }
     }
     elsif($TInfo{"Type"}=~/Typedef|Const|Volatile/)
     {
-        if($DWARF_Info_Kind{$TInfo{"BaseType"}} eq "subroutine_type")
+        if($DWARF_Info{$TInfo{"BaseType"}}{"Kind"} eq "subroutine_type")
         {
             getTypeInfo($TInfo{"BaseType"});
         }
@@ -1980,7 +1984,7 @@ sub getTypeInfo($)
         if(not $TInfo{"Name"}
         and my $Sb = $DWARF_Info{$ID}{"sibling"})
         {
-            if($DWARF_Info_Kind{$Sb} eq "subroutine_type"
+            if($DWARF_Info{$Sb}{"Kind"} eq "subroutine_type"
             and defined $TInfo{"Memb"}
             and $TInfo{"Memb"}{0}{"name"} eq "__pfn")
             { # __pfn and __delta
@@ -2100,7 +2104,7 @@ sub getTypeInfo($)
         
         while($BaseID = $DWARF_Info{$ID_}{"type"})
         {
-            my $Kind = $DWARF_Info_Kind{$ID_};
+            my $Kind = $DWARF_Info{$ID_}{"Kind"};
             if(my $Q = $Qual{$TypeType{$Kind}})
             {
                 $Name = $Q.$Name;
@@ -2229,7 +2233,7 @@ sub setSource($$$$)
 {
     my ($R, $ID, $File, $Line) = @_;
     
-    my $Unit = $CompUnit{$ID};
+    my $Unit = $DWARF_Info{$ID}{"CompUnit"};
     
     if(defined $File)
     {
@@ -2412,8 +2416,8 @@ sub getSymbolInfo($)
     
     if(my $N = $NameSpace{$ID})
     {
-        if($DWARF_Info_Kind{$N} eq "lexical_block"
-        or $DWARF_Info_Kind{$N} eq "subprogram")
+        if($DWARF_Info{$N}{"Kind"} eq "lexical_block"
+        or $DWARF_Info{$N}{"Kind"} eq "subprogram")
         { # local variables
             return;
         }
@@ -2619,13 +2623,13 @@ sub getSymbolInfo($)
         }
     }
     
-    if($DWARF_Info_Kind{$ID} eq "variable")
+    if($DWARF_Info{$ID}{"Kind"} eq "variable")
     { # global data
         $SInfo{"Data"} = 1;
         
         if(my $Spec = $DWARF_Info{$ID}{"specification"})
         {
-            if($DWARF_Info_Kind{$Spec} eq "member")
+            if($DWARF_Info{$Spec}{"Kind"} eq "member")
             {
                 my %SpecInfo = %{$DWARF_Info{$Spec}};
                 setSource(\%SInfo, $Spec, $SpecInfo{"decl_file"}, $SpecInfo{"decl_line"});
@@ -2633,7 +2637,7 @@ sub getSymbolInfo($)
                 
                 if(my $NSp = $NameSpace{$Spec})
                 {
-                    if($DWARF_Info_Kind{$NSp} eq "namespace") {
+                    if($DWARF_Info{$NSp}{"Kind"} eq "namespace") {
                         $SInfo{"NameSpace"} = completeNS($Spec);
                     }
                     else {
@@ -2655,7 +2659,7 @@ sub getSymbolInfo($)
     }
     if(my $NS = $NameSpace{$ID})
     {
-        if($DWARF_Info_Kind{$NS} eq "namespace") {
+        if($DWARF_Info{$NS}{"Kind"} eq "namespace") {
             $SInfo{"NameSpace"} = completeNS($ID);
         }
         else {
@@ -3643,6 +3647,8 @@ sub scenario()
     
     init_Registers();
     read_ABI();
+    
+    %DWARF_Info = ();
     
     remove_Unused();
     
