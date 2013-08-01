@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.99.1
+# ABI Dumper 0.99.2
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013 ROSA Laboratory
@@ -43,7 +43,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.99.1";
+my $TOOL_VERSION = "0.99.2";
 my $ABI_DUMP_VERSION = "3.2";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -468,12 +468,12 @@ sub read_Symbols($)
     }
     
     my $ExtraPath = "";
-    if($ExtraInfo) {
-        mkpath($ExtraInfo);
-    }
     
-    if($ExtraInfo) {
-        $ExtraPath = $ExtraInfo."/elf-info";
+    if($ExtraInfo)
+    {
+        $ExtraPath = $ExtraInfo."/".$Lib_Name;
+        mkpath($ExtraPath);
+        $ExtraPath .= "/elf-info";
     }
     
     $Cmd = $Readelf." -s \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
@@ -603,6 +603,9 @@ sub read_DWARF_Info($)
 {
     my $Path = $_[0];
     
+    my $Dir = get_dirname($Path);
+    my $Name = get_filename($Path);
+    
     my $Readelf = "eu-readelf";
     if(not check_Cmd($Readelf)) {
         exitStatus("Not_Found", "can't find \"$Readelf\" command");
@@ -623,13 +626,12 @@ sub read_DWARF_Info($)
     
     my $ExtraPath = "";
     
-    if($ExtraInfo) {
-        mkpath($ExtraInfo);
-    }
-    
     # ELF header
-    if($ExtraInfo) {
-        $ExtraPath = $ExtraInfo."/elf-header";
+    if($ExtraInfo)
+    {
+        $ExtraPath = $ExtraInfo."/".$Name;
+        mkpath($ExtraPath);
+        $ExtraPath .= "/elf-header";
     }
     
     if($ExtraPath)
@@ -658,14 +660,18 @@ sub read_DWARF_Info($)
         $SYS_ARCH = "x86";
     }
     
-    if($SYS_ARCH=~/amd64/i)
+    if($SYS_ARCH=~/amd64/i
+    or $SYS_ARCH=~/x86\-64/i)
     { # amd64
         $SYS_ARCH = "x86_64";
     }
     
     # source info
-    if($ExtraInfo) {
-        $ExtraPath = $ExtraInfo."/debug_line";
+    if($ExtraInfo)
+    {
+        $ExtraPath = $ExtraInfo."/".$Name;
+        mkpath($ExtraPath);
+        $ExtraPath .= "/debug_line";
     }
     
     if($ExtraPath)
@@ -704,8 +710,11 @@ sub read_DWARF_Info($)
     close(SRC);
     
     # debug_loc
-    if($ExtraInfo) {
-        $ExtraPath = $ExtraInfo."/debug_loc";
+    if($ExtraInfo)
+    {
+        $ExtraPath = $ExtraInfo."/".$Name;
+        mkpath($ExtraPath);
+        $ExtraPath .= "/debug_loc";
     }
     
     if($ExtraPath)
@@ -726,18 +735,26 @@ sub read_DWARF_Info($)
     close(LOC);
     
     # dwarf
-    if($ExtraInfo) {
-        $ExtraPath = $ExtraInfo."/debug_info";
+    if($ExtraInfo)
+    {
+        $ExtraPath = $ExtraInfo."/".$Name;
+        mkpath($ExtraPath);
+        $ExtraPath .= "/debug_info";
     }
     
+    if($Dir)
+    { # to find ".dwz" directory (Fedora)
+        chdir($Dir);
+    }
     if($ExtraPath)
     {
-        system("$Readelf $AddOpt --debug-dump=info \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        system("$Readelf $AddOpt --debug-dump=info \"$Name\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
         open(INFO, $ExtraPath);
     }
     else {
-        open(INFO, "$Readelf $AddOpt --debug-dump=info \"$Path\" 2>\"$TMP_DIR/error\" |");
+        open(INFO, "$Readelf $AddOpt --debug-dump=info \"$Name\" 2>\"$TMP_DIR/error\" |");
     }
+    chdir($ORIG_DIR);
     
     my %TypeUnit = ();
     my %Post_Change = ();
@@ -809,6 +826,11 @@ sub read_DWARF_Info($)
             }
             elsif(index($Attr, "location")!=-1)
             {
+                if($Val=~/\)\s*\Z/)
+                { # value on the next line
+                    $Val .= <INFO>;
+                }
+                
                 if($Val=~/\A\(\w+\)\s*(-?)(\w+)\Z/)
                 { # (data1) 1c
                     $Val = hex($2);
@@ -992,7 +1014,7 @@ sub read_DWARF_Info($)
             if($Compiler=~/GNU\s+(C|C\+\+)\s+(.+)\Z/)
             {
                 $SYS_GCCV = $2;
-                $SYS_GCCV=~s/\d+\s+\(.+\)\Z//; # 4.6.1 20110627 (Mandriva)
+                $SYS_GCCV=~s/\d+\s+\(.+\).*//; # 4.6.1 20110627 (Mandriva)
             }
             else {
                 $SYS_COMP = $Compiler;
@@ -1020,7 +1042,9 @@ sub read_Vtables($)
 {
     my $Path = $_[0];
     
+    my $Name = get_filename($Path);
     $Path = abs_path($Path);
+    
     
     if(index($LIB_LANG, "C++")!=-1)
     {
@@ -1041,15 +1065,18 @@ sub read_Vtables($)
             return;
         }
         
-        my $Output = $TMP_DIR."/v-tables";
+        my $ExtraPath = $TMP_DIR."/v-tables";
         
-        if($ExtraInfo) {
-            $Output = $ExtraInfo."/v-tables";
+        if($ExtraInfo)
+        {
+            $ExtraPath = $ExtraInfo."/".$Name;
+            mkpath($ExtraPath);
+            $ExtraPath .= "/v-tables";
         }
         
-        system("$VTABLE_DUMPER \"$Path\" 2>\"$TMP_DIR/error\" >\"$Output\"");
+        system("$VTABLE_DUMPER \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
         
-        my $Content = readFile($Output);
+        my $Content = readFile($ExtraPath);
         foreach my $ClassInfo (split(/\n\n\n/, $Content))
         {
             if($ClassInfo=~/\AVtable\s+for\s+(.+)\n((.|\n)+)\Z/i)
@@ -3619,6 +3646,12 @@ sub scenario()
     
     if(not @ARGV) {
         exitStatus("Error", "object path is not specified");
+    }
+    
+    if($ExtraInfo)
+    {
+        mkpath($ExtraInfo);
+        $ExtraInfo = abs_path($ExtraInfo);
     }
     
     my $Res = 0;
