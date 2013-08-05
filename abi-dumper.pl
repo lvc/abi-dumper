@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.99.2
+# ABI Dumper 0.99.3
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013 ROSA Laboratory
@@ -19,7 +19,7 @@
 #
 # COMPATIBILITY
 # =============
-#  ABI Compliance Checker >= 1.99.7
+#  ABI Compliance Checker >= 1.99.8
 #
 #
 # This program is free software: you can redistribute it and/or modify
@@ -43,7 +43,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.99.2";
+my $TOOL_VERSION = "0.99.3";
 my $ABI_DUMP_VERSION = "3.2";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -53,7 +53,7 @@ my $VTABLE_DUMPER_VERSION = "1.0";
 
 my ($Help, $ShowVersion, $DumpVersion, $OutputDump, $SortDump, $StdOut,
 $TargetVersion, $ExtraInfo, $FullDump, $AllTypes, $AllSymbols, $BinOnly,
-$SkipCxx, $Loud, $AddrToName, $DumpStatic, $Compare);
+$SkipCxx, $Loud, $AddrToName, $DumpStatic, $Compare, $AltDebugInfo);
 
 my $CmdName = get_filename($0);
 
@@ -107,6 +107,7 @@ GetOptions("h|help!" => \$Help,
   "bin-only!" => \$BinOnly,
   "dump-static!" => \$DumpStatic,
   "compare!" => \$Compare,
+  "alt=s" => \$AltDebugInfo,
 # internal options
   "addr2name!" => \$AddrToName
 ) or ERR_MESSAGE();
@@ -200,6 +201,9 @@ my %Cache;
 
 # Input
 my %DWARF_Info;
+
+# Alternate
+my %ImportedUnit;
 
 # Output
 my %SymbolInfo;
@@ -599,6 +603,63 @@ sub read_Symbols($)
     }
 }
 
+sub read_Alt_Info($)
+{
+    my $Path = $_[0];
+    my $Name = get_filename($Path);
+    
+    my $Readelf = "eu-readelf";
+    if(not check_Cmd($Readelf)) {
+        exitStatus("Not_Found", "can't find \"$Readelf\" command");
+    }
+    
+    printMsg("INFO", "Reading alternate debug-info");
+    
+    my $ExtraPath = undef;
+    
+    if($ExtraInfo)
+    {
+        $ExtraPath = $ExtraInfo."/".$Name;
+        mkpath($ExtraPath);
+        $ExtraPath .= "/debug_info";
+    }
+    
+    if($ExtraPath)
+    {
+        system("$Readelf -N --debug-dump=info \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        open(INFO, $ExtraPath);
+    }
+    else {
+        open(INFO, "$Readelf -N --debug-dump=info \"$Path\" 2>\"$TMP_DIR/error\" |");
+    }
+    
+    my $ID = undef;
+    my $Num = 0;
+    
+    while(<INFO>)
+    {
+        
+        if(/\[\s*(\w+?)\]  (\w+)/)
+        {
+            if($2 eq "partial_unit")
+            {
+                $ID = $1;
+                $Num = 0;
+                $ImportedUnit{$ID}{0} = $_;
+            }
+            else {
+                $ID = undef;
+            }
+        }
+        elsif(defined $ID)
+        {
+            if(not /\A \w/) {
+                $ImportedUnit{$ID}{$Num++} = $_;
+            }
+        }
+    }
+}
+
 sub read_DWARF_Info($)
 {
     my $Path = $_[0];
@@ -623,6 +684,8 @@ sub read_DWARF_Info($)
     { # No DWARF info
         return 0;
     }
+    
+    printMsg("INFO", "Reading debug-info");
     
     my $ExtraPath = "";
     
@@ -786,21 +849,50 @@ sub read_DWARF_Info($)
         "signature"
     );
     
-    while(<INFO>)
+    my $Line = undef;
+    my $Import = undef;
+    my $Import_Num = 0;
+    
+    while(($Import and $Line = $ImportedUnit{$Import}{$Import_Num}) or $Line = <INFO>)
     {
-        if($ID and /\A\s*(\w+)\s*(.+?)\s*\Z/)
+        if(not defined $ImportedUnit{$Import}{$Import_Num})
+        {
+            $Import_Num = 0;
+            delete($ImportedUnit{$Import});
+            $Import = undef;
+        }
+        
+        if($Import) {
+            $Import_Num++;
+        }
+        if($ID and $Line=~/\A\s*(\w+)\s*(.+?)\s*\Z/)
         {
             my ($Attr, $Val) = ($1, $2);
             
+            if($Kind eq "imported_unit")
+            {
+                if($Attr eq "import")
+                {
+                    if($Val=~/\(GNU_ref_alt\)\s*\[\s*(\w+?)\]/)
+                    {
+                        if(defined $ImportedUnit{$1})
+                        {
+                            $Import = $1;
+                            $Import_Num = 0;
+                        }
+                    }
+                }
+            }
+            
             if($Attr eq "Type")
             {
-                if(/Type\s+signature:\s*0x(\w+)/) {
+                if($Line=~/Type\s+signature:\s*0x(\w+)/) {
                     $TypeUnit_Sign = $1;
                 }
-                if(/Type\s+offset:\s*0x(\w+)/) {
+                if($Line=~/Type\s+offset:\s*0x(\w+)/) {
                     $Type_Offset = hex($1);
                 }
-                if(/Type\s+unit\s+at\s+offset\s+(\d+)/) {
+                if($Line=~/Type\s+unit\s+at\s+offset\s+(\d+)/) {
                     $TypeUnit_Offset = $1;
                 }
                 next;
@@ -811,9 +903,14 @@ sub read_DWARF_Info($)
                 next;
             }
             
-            if($Val=~/\A\s*\([^()]*\)\s*\[\s*(\w+)\]\s*\Z/)
+            if($Val=~/\A\s*\(([^()]*)\)\s*\[\s*(\w+)\]\s*\Z/)
             { # ref4, ref_udata, ref_addr, etc.
-                $Val = hex($1);
+                $Val = hex($2);
+                
+                if($1 eq "GNU_ref_alt")
+                {
+                    $Val = -$Val;
+                }
             }
             elsif($Attr eq "name")
             {
@@ -892,6 +989,14 @@ sub read_DWARF_Info($)
                 $DWARF_Info{$ID}{"rID"} = $ID-$ID_Shift;
             }
             
+            if($Import)
+            {
+                if(defined $Shift{$Attr})
+                {
+                    $Val = -$Val;
+                }
+            }
+            
             $DWARF_Info{$ID}{$Attr} = "$Val";
             
             if($Kind eq "compile_unit")
@@ -919,11 +1024,16 @@ sub read_DWARF_Info($)
                 }
             }
         }
-        elsif(/\A\s{0,4}\[\s*(\w+)\](\s*)(\w+)/)
+        elsif($Line=~/\A\s{0,4}\[\s*(\w+)\](\s*)(\w+)/)
         {
             $ID = hex($1);
             $NS = $2;
             $Kind = $3;
+            
+            if($Import)
+            {
+                $ID = -$ID;
+            }
             
             if($Shift_Enabled)
             {
@@ -971,7 +1081,7 @@ sub read_DWARF_Info($)
             }
         }
         elsif(not defined $SYS_WORD
-        and /Address\s*size:\s*(\d+)/i)
+        and $Line=~/Address\s*size:\s*(\d+)/i)
         {
             $SYS_WORD = $1;
         }
@@ -1097,6 +1207,8 @@ sub read_Vtables($)
 
 sub dump_ABI()
 {
+    printMsg("INFO", "Creating ABI dump");
+    
     my %ABI = (
         "TypeInfo" => \%TypeInfo,
         "SymbolInfo" => \%SymbolInfo,
@@ -1138,7 +1250,7 @@ sub dump_ABI()
         print DUMP $ABI_DUMP;
         close(DUMP);
         
-        printMsg("INFO", "The object ABI has been dumped to:\n  $OutputDump");
+        printMsg("INFO", "\nThe object ABI has been dumped to:\n  $OutputDump");
     }
 }
 
@@ -1161,9 +1273,17 @@ sub unmangleString($)
 
 sub read_ABI()
 {
+    printMsg("INFO", "Extracting ABI information");
+
     my %CurID = ();
     
-    foreach my $ID (sort {int($a) <=> int($b)} keys(%DWARF_Info))
+    my @IDs = sort {int($a) <=> int($b)} keys(%DWARF_Info);
+    
+    if($AltDebugInfo) {
+        @IDs = sort {$b>0 <=> $a>0} sort {abs(int($a)) <=> abs(int($b))} @IDs;
+    }
+    
+    foreach my $ID (@IDs)
     {
         $ID = "$ID";
         
@@ -1280,7 +1400,13 @@ sub read_ABI()
     $TName_Tids{"Intrinsic"}{"..."}{"-1"} = 1;
     $Cache{"getTypeInfo"}{"-1"} = 1;
     
-    foreach my $ID (sort {int($a) <=> int($b)} keys(%DWARF_Info))
+    my @IDs = sort {int($a) <=> int($b)} keys(%DWARF_Info);
+    
+    if($AltDebugInfo) {
+        @IDs = sort {$b>0 <=> $a>0} sort {abs(int($a)) <=> abs(int($b))} @IDs;
+    }
+    
+    foreach my $ID (@IDs)
     {
         if(my $Kind = $DWARF_Info{$ID}{"Kind"})
         {
@@ -1317,7 +1443,13 @@ sub read_ABI()
     my %Incomplete = ();
     my %Incomplete_TN = ();
     
-    foreach my $Tid (sort {int($a) <=> int($b)} keys(%TypeInfo))
+    my @IDs = sort {int($a) <=> int($b)} keys(%TypeInfo);
+    
+    if($AltDebugInfo) {
+        @IDs = sort {$b>0 <=> $a>0} sort {abs(int($a)) <=> abs(int($b))} @IDs;
+    }
+    
+    foreach my $Tid (@IDs)
     {
         my $Name = $TypeInfo{$Tid}{"Name"};
         my $Type = $TypeInfo{$Tid}{"Type"};
@@ -1342,7 +1474,13 @@ sub read_ABI()
         my $Name = $TypeInfo{$Tid}{"Name"};
         my $Type = $TypeInfo{$Tid}{"Type"};
         
-        foreach my $Tid_Adv (keys(%{$TName_Tids{$Type}{$Name}}))
+        my @Adv_IDs = sort {int($a) <=> int($b)} keys(%{$TName_Tids{$Type}{$Name}});
+    
+        if($AltDebugInfo) {
+            @Adv_IDs = sort {$b>0 <=> $a>0} sort {abs(int($a)) <=> abs(int($b))} @Adv_IDs;
+        }
+        
+        foreach my $Tid_Adv (@Adv_IDs)
         {
             if($Tid_Adv!=$Tid)
             {
@@ -1351,8 +1489,15 @@ sub read_ABI()
                 {
                     foreach my $Attr (keys(%{$TypeInfo{$Tid_Adv}}))
                     {
-                        if(not defined $TypeInfo{$Tid}{$Attr}) {
-                            $TypeInfo{$Tid}{$Attr} = $TypeInfo{$Tid_Adv}{$Attr};
+                        if(not defined $TypeInfo{$Tid}{$Attr})
+                        {
+                            if(ref($TypeInfo{$Tid_Adv}{$Attr}) eq "HASH") {
+                                $TypeInfo{$Tid}{$Attr} = dclone($TypeInfo{$Tid_Adv}{$Attr});
+                            }
+                            else {
+                                $TypeInfo{$Tid}{$Attr} = $TypeInfo{$Tid_Adv}{$Attr};
+                            }
+                            
                         }
                     }
                     last;
@@ -1385,7 +1530,8 @@ sub read_ABI()
                     my $Type = $TypeInfo{$Tid}{"Type"};
                     
                     if(not defined $TName_Tid{$Type}{$Name}
-                    or $Tid<$TName_Tid{$Type}{$Name}) {
+                    or ($Tid>0 and $Tid<$TName_Tid{$Type}{$Name})
+                    or ($Tid>0 and $TName_Tid{$Type}{$Name}<0)) {
                         $TName_Tid{$Type}{$Name} = $Tid;
                     }
                     $TName_Tids{$Type}{$Name}{$Tid} = 1;
@@ -2220,7 +2366,8 @@ sub getTypeInfo($)
     if($TInfo{"Name"})
     {
         if(not defined $TName_Tid{$TInfo{"Type"}}{$TInfo{"Name"}}
-        or $ID<$TName_Tid{$TInfo{"Type"}}{$TInfo{"Name"}})
+        or ($ID>0 and $ID<$TName_Tid{$TInfo{"Type"}}{$TInfo{"Name"}})
+        or ($ID>0 and $TName_Tid{$TInfo{"Type"}}{$TInfo{"Name"}}<0))
         {
             $TName_Tid{$TInfo{"Type"}}{$TInfo{"Name"}} = "$ID";
         }
@@ -3648,6 +3795,61 @@ sub scenario()
         exitStatus("Error", "object path is not specified");
     }
     
+    foreach my $Obj (@ARGV)
+    {
+        if(not -e $Obj) {
+            exitStatus("Access_Error", "can't access \'$Obj\'");
+        }
+    }
+    
+    if($AltDebugInfo)
+    {
+        if(not -e $AltDebugInfo) {
+            exitStatus("Access_Error", "can't access \'$AltDebugInfo\'");
+        }
+    }
+    else
+    {
+        my $Readelf = "eu-readelf";
+        if(not check_Cmd($Readelf)) {
+            exitStatus("Not_Found", "can't find \"$Readelf\" command");
+        }
+        foreach my $Obj (@ARGV)
+        {
+            my $Sect = `$Readelf -S \"$Obj\" 2>\"$TMP_DIR/error\"`;
+    
+            if($Sect=~/\.debug_info/)
+            {
+                if($Sect=~/\.gnu_debugaltlink/)
+                {
+                    my $Str = `$Readelf --strings=.gnu_debugaltlink \"$Obj\" 2>\"$TMP_DIR/error\"`;
+                    
+                    if($Str=~/0\]\s*(.+)/)
+                    {
+                        my $AltObj = get_dirname($Obj)."/".$1;
+                        
+                        while($AltObj=~s/\/[^\/]+\/..\//\//g){};
+                        
+                        if(-e $AltObj)
+                        {
+                            printMsg("INFO", "Set alternate debug-info file to \'$AltObj\' (use -alt option to change it)");
+                            $AltDebugInfo = $AltObj;
+                        }
+                        else
+                        {
+                            printMsg("WARNING", "can't access \'$AltObj\'");
+                        }
+                    }
+                }
+                last;
+            }
+        }
+    }
+    
+    if($AltDebugInfo) {
+        read_Alt_Info($AltDebugInfo);
+    }
+    
     if($ExtraInfo)
     {
         mkpath($ExtraInfo);
@@ -3658,10 +3860,6 @@ sub scenario()
     
     foreach my $Obj (@ARGV)
     {
-        if(not -e $Obj) {
-            exitStatus("Access_Error", "can't access \'$Obj\'");
-        }
-        
         $TargetName = get_filename(realpath($Obj));
         $TargetName=~s/\.debug\Z//; # nouveau.ko.debug
         
