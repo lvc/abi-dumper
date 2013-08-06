@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.99.3
+# ABI Dumper 0.99.4
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013 ROSA Laboratory
@@ -43,7 +43,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.99.3";
+my $TOOL_VERSION = "0.99.4";
 my $ABI_DUMP_VERSION = "3.2";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -204,6 +204,7 @@ my %DWARF_Info;
 
 # Alternate
 my %ImportedUnit;
+my %ImportedDecl;
 
 # Output
 my %SymbolInfo;
@@ -224,6 +225,7 @@ my %MergedTypes;
 my %LocalType;
 
 my %SourceFile;
+my %SourceFile_Alt;
 my %DebugLoc;
 my %TName_Tid;
 my %TName_Tids;
@@ -272,6 +274,7 @@ my %UsedType;
 
 # ELF
 my %Library_Symbol;
+my %Library_LocalSymbol;
 my %Library_UndefSymbol;
 my %Library_Needed;
 my %SymbolTable;
@@ -531,7 +534,12 @@ sub read_Symbols($)
                     next;
                 }
                 
-                $Library_Symbol{$TargetName}{$Symbol} = ($Type eq "OBJECT")?-$Size:1;
+                if($Bind eq "LOCAL") {
+                    $Library_LocalSymbol{$TargetName}{$Symbol} = ($Type eq "OBJECT")?-$Size:1;
+                }
+                else {
+                    $Library_Symbol{$TargetName}{$Symbol} = ($Type eq "OBJECT")?-$Size:1;
+                }
                 
                 $Symbol_Value{$Symbol} = $Value;
                 $Value_Symbol{$Value}{$Symbol} = 1;
@@ -617,6 +625,40 @@ sub read_Alt_Info($)
     
     my $ExtraPath = undef;
     
+    # lines info
+    
+    if($ExtraInfo)
+    {
+        $ExtraPath = $ExtraInfo."/".$Name;
+        mkpath($ExtraPath);
+        $ExtraPath .= "/debug_line";
+    }
+    
+    if($ExtraPath)
+    {
+        system("$Readelf -N --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        open(SRC, $ExtraPath);
+    }
+    else {
+        open(SRC, "$Readelf -N --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" |");
+    }
+    
+    my $Offset = undef;
+    
+    while(<SRC>)
+    {
+        if( /(\d+)\s+\d+\s+\d+\s+\d+\s+([^ ]+)/)
+        {
+            my ($Num, $File) = ($1, $2);
+            chomp($File);
+            
+            $SourceFile_Alt{0}{$Num} = $File;
+        }
+    }
+    close(SRC);
+    
+    # debug info
+    
     if($ExtraInfo)
     {
         $ExtraPath = $ExtraInfo."/".$Name;
@@ -639,16 +681,22 @@ sub read_Alt_Info($)
     while(<INFO>)
     {
         
-        if(/\[\s*(\w+?)\]  (\w+)/)
+        if(/\A \[\s*(\w+?)\](\s+)(\w+)/)
         {
-            if($2 eq "partial_unit")
+            if($3 eq "partial_unit")
             {
                 $ID = $1;
                 $Num = 0;
                 $ImportedUnit{$ID}{0} = $_;
             }
-            else {
+            elsif(length($2)==2)
+            {
                 $ID = undef;
+            }
+            elsif(defined $ID)
+            {
+                $ImportedDecl{$1} = $ID;
+                $ImportedUnit{$ID}{$Num++} = $_;
             }
         }
         elsif(defined $ID)
@@ -761,13 +809,6 @@ sub read_DWARF_Info($)
             chomp($File);
             
             $SourceFile{$Offset}{$Num} = $File;
-            
-            if($File=~/\.($HEADER_EXT)\Z/) {
-                $HeadersInfo{$File} = 1;
-            }
-            elsif($File ne "<built-in>") {
-                $SourcesInfo{$File} = 1;
-            }
         }
     }
     close(SRC);
@@ -805,6 +846,8 @@ sub read_DWARF_Info($)
         $ExtraPath .= "/debug_info";
     }
     
+    my $INFO_fh;
+    
     if($Dir)
     { # to find ".dwz" directory (Fedora)
         chdir($Dir);
@@ -812,12 +855,30 @@ sub read_DWARF_Info($)
     if($ExtraPath)
     {
         system("$Readelf $AddOpt --debug-dump=info \"$Name\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
-        open(INFO, $ExtraPath);
+        open($INFO_fh, $ExtraPath);
     }
     else {
-        open(INFO, "$Readelf $AddOpt --debug-dump=info \"$Name\" 2>\"$TMP_DIR/error\" |");
+        open($INFO_fh, "$Readelf $AddOpt --debug-dump=info \"$Name\" 2>\"$TMP_DIR/error\" |");
     }
     chdir($ORIG_DIR);
+    
+    read_DWARF_Dump($INFO_fh, 1);
+    
+    close($INFO_fh);
+    
+    if(my $Err = readFile("$TMP_DIR/error"))
+    { # eu-readelf: cannot get next DIE: invalid DWARF
+        if($Err=~/invalid DWARF/i) {
+            exitStatus("Invalid_DWARF", "invalid DWARF info");
+        }
+    }
+    
+    return 1;
+}
+
+sub read_DWARF_Dump($$)
+{
+    my ($FH, $Primary) = @_;
     
     my %TypeUnit = ();
     my %Post_Change = ();
@@ -853,7 +914,10 @@ sub read_DWARF_Info($)
     my $Import = undef;
     my $Import_Num = 0;
     
-    while(($Import and $Line = $ImportedUnit{$Import}{$Import_Num}) or $Line = <INFO>)
+    my %UsedUnit;
+    my %UsedDecl;
+    
+    while(($Import and $Line = $ImportedUnit{$Import}{$Import_Num}) or $Line = <$FH>)
     {
         if(not defined $ImportedUnit{$Import}{$Import_Num})
         {
@@ -879,6 +943,7 @@ sub read_DWARF_Info($)
                         {
                             $Import = $1;
                             $Import_Num = 0;
+                            $UsedUnit{$Import} = 1;
                         }
                     }
                 }
@@ -910,6 +975,7 @@ sub read_DWARF_Info($)
                 if($1 eq "GNU_ref_alt")
                 {
                     $Val = -$Val;
+                    $UsedDecl{$2} = 1;
                 }
             }
             elsif($Attr eq "name")
@@ -925,7 +991,7 @@ sub read_DWARF_Info($)
             {
                 if($Val=~/\)\s*\Z/)
                 { # value on the next line
-                    $Val .= <INFO>;
+                    $Val .= <$FH>;
                 }
                 
                 if($Val=~/\A\(\w+\)\s*(-?)(\w+)\Z/)
@@ -989,7 +1055,7 @@ sub read_DWARF_Info($)
                 $DWARF_Info{$ID}{"rID"} = $ID-$ID_Shift;
             }
             
-            if($Import)
+            if($Import or not $Primary)
             {
                 if(defined $Shift{$Attr})
                 {
@@ -1017,7 +1083,7 @@ sub read_DWARF_Info($)
                 }
             }
             
-            if($Kind eq "partial_unit")
+            if($Kind eq "partial_unit" and not $Import)
             { # support for dwz
                 if($Attr eq "stmt_list") {
                     $CUnit = $Val;
@@ -1030,7 +1096,7 @@ sub read_DWARF_Info($)
             $NS = $2;
             $Kind = $3;
             
-            if($Import)
+            if($Import or not $Primary)
             {
                 $ID = -$ID;
             }
@@ -1086,14 +1152,6 @@ sub read_DWARF_Info($)
             $SYS_WORD = $1;
         }
     }
-    close(INFO);
-    
-    if(my $Err = readFile("$TMP_DIR/error"))
-    { # eu-readelf: cannot get next DIE: invalid DWARF
-        if($Err=~/invalid DWARF/i) {
-            exitStatus("Invalid_DWARF", "invalid DWARF info");
-        }
-    }
     
     foreach my $ID (keys(%Post_Change))
     {
@@ -1114,38 +1172,83 @@ sub read_DWARF_Info($)
     %TypeUnit = ();
     %Post_Change = ();
     
-    if(defined $CUnit_F)
+    if($Primary)
     {
-        if(my $Compiler= $DWARF_Info{$CUnit_F}{"producer"})
+        if(defined $CUnit_F)
         {
-            $Compiler=~s/\A\"//;
-            $Compiler=~s/\"\Z//;
-            
-            if($Compiler=~/GNU\s+(C|C\+\+)\s+(.+)\Z/)
+            if(my $Compiler= $DWARF_Info{$CUnit_F}{"producer"})
             {
-                $SYS_GCCV = $2;
-                $SYS_GCCV=~s/\d+\s+\(.+\).*//; # 4.6.1 20110627 (Mandriva)
+                $Compiler=~s/\A\"//;
+                $Compiler=~s/\"\Z//;
+                
+                if($Compiler=~/GNU\s+(C|C\+\+)\s+(.+)\Z/)
+                {
+                    $SYS_GCCV = $2;
+                    $SYS_GCCV=~s/\d+\s+\(.+\).*//; # 4.6.1 20110627 (Mandriva)
+                }
+                else {
+                    $SYS_COMP = $Compiler;
+                }
             }
-            else {
-                $SYS_COMP = $Compiler;
+            if(my $Lang = $DWARF_Info{$CUnit_F}{"language"})
+            {
+                $Lang=~s/\s*\(.+?\)\Z//;
+                if($Lang=~/C\d/i) {
+                    $LIB_LANG = "C";
+                }
+                elsif($Lang=~/C\+\+/i) {
+                    $LIB_LANG = "C++";
+                }
+                else {
+                    $LIB_LANG = $Lang;
+                }
             }
         }
-        if(my $Lang = $DWARF_Info{$CUnit_F}{"language"})
+        
+        my %AddUnits = ();
+        
+        foreach my $ID (keys(%UsedDecl))
         {
-            $Lang=~s/\s*\(.+?\)\Z//;
-            if($Lang=~/C\d/i) {
-                $LIB_LANG = "C";
-            }
-            elsif($Lang=~/C\+\+/i) {
-                $LIB_LANG = "C++";
-            }
-            else {
-                $LIB_LANG = $Lang;
+            if(my $U_ID = $ImportedDecl{$ID})
+            {
+                if(not $UsedUnit{$U_ID})
+                {
+                    $AddUnits{$U_ID} = 1;
+                }
             }
         }
+        
+        if(keys(%AddUnits))
+        {
+            my $ADD_DUMP = "";
+            
+            foreach my $U_ID (sort {hex($a)<=>hex($b)} keys(%AddUnits))
+            {
+                foreach my $N (sort {int($a)<=>int($b)} keys(%{$ImportedUnit{$U_ID}}))
+                {
+                    $ADD_DUMP .= $ImportedUnit{$U_ID}{$N};
+                }
+            }
+            
+            my $AddUnit_F = $TMP_DIR."/add_unit.dump";
+            
+            writeFile($AddUnit_F, $ADD_DUMP);
+            
+            my $FH_add;
+            open($FH_add, $AddUnit_F);
+            read_DWARF_Dump($FH_add, 0);
+            close($FH_add);
+            
+            unlink($AddUnit_F);
+        }
+        
     }
     
-    return 1;
+    # clean memory
+    %ImportedUnit = ();
+    %ImportedDecl = ();
+    %UsedUnit = ();
+    %UsedDecl = ();
 }
 
 sub read_Vtables($)
@@ -1213,6 +1316,7 @@ sub dump_ABI()
         "TypeInfo" => \%TypeInfo,
         "SymbolInfo" => \%SymbolInfo,
         "Symbols" => \%Library_Symbol,
+        "LocalSymbols" => \%Library_LocalSymbol,
         "UndefinedSymbols" => \%Library_UndefSymbol,
         "Needed" => \%Library_Needed,
         "SymbolVersion" => \%SymVer,
@@ -1562,6 +1666,11 @@ sub read_ABI()
     
     foreach my $ID (sort {int($a) <=> int($b)} keys(%DWARF_Info))
     {
+        if($ID<0)
+        { # imported
+            next;
+        }
+        
         if($DWARF_Info{$ID}{"Kind"} eq "subprogram"
         or $DWARF_Info{$ID}{"Kind"} eq "variable")
         {
@@ -1759,7 +1868,8 @@ sub selectSymbol($)
             { # defined in source files
                 return 0;
             }
-            else {
+            else
+            {
                 return 2;
             }
         }
@@ -2352,7 +2462,7 @@ sub getTypeInfo($)
     
     if(not $TInfo{"Name"})
     {
-        if($TInfo{"Type"}=~/\A(Struct|Enum|Union)\Z/)
+        if($TInfo{"Type"}=~/\A(Class|Struct|Enum|Union)\Z/)
         {
             if($TInfo{"Header"}) {
                 $TInfo{"Name"} = "anon-".lc($TInfo{"Type"})."-".$TInfo{"Header"}."-".$TInfo{"Line"};
@@ -2411,16 +2521,26 @@ sub setSource($$$$)
     
     if(defined $File)
     {
-        if($SourceFile{$Unit}{$File}=~/\.($HEADER_EXT)\Z/)
+        my $Name = undef;
+        
+        if($ID>=0) {
+            $Name = $SourceFile{$Unit}{$File};
+        }
+        else
+        { # imported
+            $Name = $SourceFile_Alt{0}{$File};
+        }
+        
+        if($Name=~/\.($HEADER_EXT)\Z/)
         {
-            $R->{"Header"} = $SourceFile{$Unit}{$File};
+            $R->{"Header"} = $Name;
             if(defined $Line) {
                 $R->{"Line"} = $Line;
             }
         }
-        elsif($SourceFile{$Unit}{$File} ne "<built-in>")
+        elsif($Name ne "<built-in>")
         {
-            $R->{"Source"} = $SourceFile{$Unit}{$File};
+            $R->{"Source"} = $Name;
             if(defined $Line) {
                 $R->{"SourceLine"} = $Line;
             }
@@ -3826,7 +3946,9 @@ sub scenario()
                     
                     if($Str=~/0\]\s*(.+)/)
                     {
-                        my $AltObj = get_dirname($Obj)."/".$1;
+                        my $AltObj_R = get_dirname($Obj)."/".$1;
+                        
+                        my $AltObj = $AltObj_R;
                         
                         while($AltObj=~s/\/[^\/]+\/..\//\//g){};
                         
@@ -3837,7 +3959,7 @@ sub scenario()
                         }
                         else
                         {
-                            printMsg("WARNING", "can't access \'$AltObj\'");
+                            printMsg("WARNING", "can't access \'$AltObj_R\'");
                         }
                     }
                 }
@@ -3879,9 +4001,27 @@ sub scenario()
     init_Registers();
     read_ABI();
     
+    # clean memory
     %DWARF_Info = ();
     
     remove_Unused();
+    
+    # clean memory
+    %SourceFile = ();
+    %SourceFile_Alt = ();
+    %DebugLoc = ();
+    %TName_Tid = ();
+    %TName_Tids = ();
+    
+    %TypeMember = ();
+    %ArrayCount = ();
+    %FuncParam = ();
+    %Inheritance = ();
+    %NameSpace = ();
+    %SpecElem = ();
+    %ClassMethods = ();
+    %TypeSpec = ();
+    %ClassChild = ();
     
     dump_ABI();
     
