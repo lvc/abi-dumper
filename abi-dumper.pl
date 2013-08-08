@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.99.4
+# ABI Dumper 0.99.5
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013 ROSA Laboratory
@@ -43,7 +43,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.99.4";
+my $TOOL_VERSION = "0.99.5";
 my $ABI_DUMP_VERSION = "3.2";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -647,7 +647,7 @@ sub read_Alt_Info($)
     
     while(<SRC>)
     {
-        if( /(\d+)\s+\d+\s+\d+\s+\d+\s+([^ ]+)/)
+        if(/(\d+)\s+\d+\s+\d+\s+\d+\s+([^ ]+)/)
         {
             my ($Num, $File) = ($1, $2);
             chomp($File);
@@ -680,8 +680,14 @@ sub read_Alt_Info($)
     
     while(<INFO>)
     {
-        
-        if(/\A \[\s*(\w+?)\](\s+)(\w+)/)
+        if(index($_, "  ")==0)
+        {
+            if(defined $ID) {
+                $ImportedUnit{$ID}{$Num++} = $_;
+            }
+        }
+        elsif(index($_, " [")==0
+        and /\A \[\s*(\w+?)\](\s+)(\w+)/)
         {
             if($3 eq "partial_unit")
             {
@@ -690,18 +696,12 @@ sub read_Alt_Info($)
                 $ImportedUnit{$ID}{0} = $_;
             }
             elsif(length($2)==2)
-            {
+            { # not a partial_unit
                 $ID = undef;
             }
             elsif(defined $ID)
             {
                 $ImportedDecl{$1} = $ID;
-                $ImportedUnit{$ID}{$Num++} = $_;
-            }
-        }
-        elsif(defined $ID)
-        {
-            if(not /\A \w/) {
                 $ImportedUnit{$ID}{$Num++} = $_;
             }
         }
@@ -991,7 +991,12 @@ sub read_DWARF_Dump($$)
             {
                 if($Val=~/\)\s*\Z/)
                 { # value on the next line
-                    $Val .= <$FH>;
+                    if($Import) {
+                        $Val .= $ImportedUnit{$Import}{$Import_Num}
+                    }
+                    else {
+                        $Val .= <$FH>;
+                    }
                 }
                 
                 if($Val=~/\A\(\w+\)\s*(-?)(\w+)\Z/)
@@ -1090,7 +1095,7 @@ sub read_DWARF_Dump($$)
                 }
             }
         }
-        elsif($Line=~/\A\s{0,4}\[\s*(\w+)\](\s*)(\w+)/)
+        elsif($Line=~/\A \[\s*(\w+)\](\s*)(\w+)/)
         {
             $ID = hex($1);
             $NS = $2;
@@ -2199,37 +2204,46 @@ sub getTypeInfo($)
         $DWARF_Info{$ID}{"name"} = $DWARF_Info{$Spec}{"name"};
     }
     
+    my $NS = $NameSpace{$ID};
+    if(not $NS)
+    {
+        if(my $Sp = $DWARF_Info{$ID}{"specification"}) {
+            $NS = $NameSpace{$Sp};
+        }
+    }
+    
+    if($NS)
+    {
+        if($DWARF_Info{$NS}{"Kind"} eq "namespace")
+        {
+            if(my $NS_F = completeNS($ID))
+            {
+                $TInfo{"NameSpace"} = $NS_F;
+            }
+        }
+        elsif($DWARF_Info{$NS}{"Kind"} eq "class_type"
+        or $DWARF_Info{$NS}{"Kind"} eq "structure_type")
+        { # class
+            getTypeInfo($NS);
+            
+            if(my $Sp = $SpecElem{$NS}) {
+                getTypeInfo($Sp);
+            }
+            
+            if($TypeInfo{$NS}{"Name"})
+            {
+                $TInfo{"NameSpace"} = $TypeInfo{$NS}{"Name"};
+                $TInfo{"NameSpace"}=~s/\Astruct //;
+            }
+        }
+    }
+    
     if(my $Name = $DWARF_Info{$ID}{"name"})
     {
         $TInfo{"Name"} = $Name;
         
-        my $NS = $NameSpace{$ID};
-        if(not $NS)
-        {
-            if(my $Sp = $DWARF_Info{$ID}{"specification"}) {
-                $NS = $NameSpace{$Sp};
-            }
-        }
-        
-        if($NS)
-        {
-            if($DWARF_Info{$NS}{"Kind"} eq "namespace")
-            {
-                if(my $NS_F = completeNS($ID))
-                {
-                    $TInfo{"NameSpace"} = $NS_F;
-                    $TInfo{"Name"} = $TInfo{"NameSpace"}."::".$TInfo{"Name"};
-                }
-            }
-            elsif($DWARF_Info{$NS}{"Kind"} eq "class_type"
-            or $DWARF_Info{$NS}{"Kind"} eq "structure_type")
-            { # class
-                getTypeInfo($NS);
-                
-                $TInfo{"NameSpace"} = $TypeInfo{$NS}{"Name"};
-                $TInfo{"NameSpace"}=~s/\Astruct //;
-                $TInfo{"Name"} = $TInfo{"NameSpace"}."::".$TInfo{"Name"};
-            }
+        if($TInfo{"NameSpace"}) {
+            $TInfo{"Name"} = $TInfo{"NameSpace"}."::".$TInfo{"Name"};
         }
         
         if($TInfo{"Type"}=~/\A(Struct|Class)\Z/)
@@ -2469,6 +2483,10 @@ sub getTypeInfo($)
             }
             elsif($TInfo{"Source"}) {
                 $TInfo{"Name"} = "anon-".lc($TInfo{"Type"})."-".$TInfo{"Source"}."-".$TInfo{"SourceLine"};
+            }
+            
+            if($TInfo{"Name"} and $TInfo{"NameSpace"}) {
+                $TInfo{"Name"} = $TInfo{"NameSpace"}."::".$TInfo{"Name"};
             }
         }
     }
@@ -3950,7 +3968,7 @@ sub scenario()
                         
                         my $AltObj = $AltObj_R;
                         
-                        while($AltObj=~s/\/[^\/]+\/..\//\//g){};
+                        while($AltObj=~s/\/[^\/]+\/\.\.\//\//){};
                         
                         if(-e $AltObj)
                         {
