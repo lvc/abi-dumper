@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.99.5
+# ABI Dumper 0.99.6
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013 ROSA Laboratory
@@ -43,7 +43,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.99.5";
+my $TOOL_VERSION = "0.99.6";
 my $ABI_DUMP_VERSION = "3.2";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -53,7 +53,8 @@ my $VTABLE_DUMPER_VERSION = "1.0";
 
 my ($Help, $ShowVersion, $DumpVersion, $OutputDump, $SortDump, $StdOut,
 $TargetVersion, $ExtraInfo, $FullDump, $AllTypes, $AllSymbols, $BinOnly,
-$SkipCxx, $Loud, $AddrToName, $DumpStatic, $Compare, $AltDebugInfo);
+$SkipCxx, $Loud, $AddrToName, $DumpStatic, $Compare, $AltDebugInfo,
+$OptMem);
 
 my $CmdName = get_filename($0);
 
@@ -100,14 +101,15 @@ GetOptions("h|help!" => \$Help,
   "loud!" => \$Loud,
   "lver|lv=s" => \$TargetVersion,
   "extra-info=s" => \$ExtraInfo,
+  "bin-only!" => \$BinOnly,
   "all-types!" => \$AllTypes,
   "all-symbols!" => \$AllSymbols,
   "skip-cxx!" => \$SkipCxx,
   "all!" => \$FullDump,
-  "bin-only!" => \$BinOnly,
   "dump-static!" => \$DumpStatic,
   "compare!" => \$Compare,
   "alt=s" => \$AltDebugInfo,
+  "mem!" =>\$OptMem,
 # internal options
   "addr2name!" => \$AddrToName
 ) or ERR_MESSAGE();
@@ -191,6 +193,14 @@ GENERAL OPTIONS:
       
   -compare OLD.dump NEW.dump
       Show added/removed symbols between two ABI dumps.
+      
+  -alt PATH
+      Path to the alternate debug info (Fedora). It is
+      detected automatically from gnu_debugaltlink section
+      of the input object if not specified.
+      
+  -mem
+      Try to optimize system memory usage.
 ";
 
 sub HELP_MESSAGE() {
@@ -217,6 +227,7 @@ my %FuncParam;
 my %Inheritance;
 my %NameSpace;
 my %SpecElem;
+my %OrigElem;
 my %ClassMethods;
 my %TypeSpec;
 my %ClassChild;
@@ -517,13 +528,12 @@ sub read_Symbols($)
             elsif(index($_, "'.symtab'")!=-1)
             { # symbol table
                 $symtab = 1;
-                next;
             }
         }
         if(my ($Value, $Size, $Type, $Bind, $Vis, $Ndx, $Symbol) = readline_ELF($_))
         { # read ELF entry
             if(not $symtab)
-            {
+            { # dynsym
                 if(skipSymbol($Symbol)) {
                     next;
                 }
@@ -876,6 +886,31 @@ sub read_DWARF_Info($)
     return 1;
 }
 
+sub getSource($)
+{
+    my $ID = $_[0];
+    
+    if(defined $DWARF_Info{$ID}{"decl_file"})
+    {
+        my $File = $DWARF_Info{$ID}{"decl_file"};
+        my $Unit = $DWARF_Info{$ID}{"CompUnit"};
+        
+        my $Name = undef;
+        
+        if($ID>=0) {
+            $Name = $SourceFile{$Unit}{$File};
+        }
+        else
+        { # imported
+            $Name = $SourceFile_Alt{0}{$File};
+        }
+        
+        return $Name;
+    }
+    
+    return undef;
+}
+
 sub read_DWARF_Dump($$)
 {
     my ($FH, $Primary) = @_;
@@ -888,7 +923,6 @@ sub read_DWARF_Dump($$)
     
     my $Shift_Enabled = 1;
     my $ID_Shift = undef;
-    
     
     my $CUnit = undef;
     my $CUnit_F = undef;
@@ -917,6 +951,29 @@ sub read_DWARF_Dump($$)
     my %UsedUnit;
     my %UsedDecl;
     
+    my $ID_Pre = undef; # mem opt
+    my %Mangled_Subs = (); # mem opt
+    my %Simple_Types = ();
+    my %Type_Base = ();
+    
+    my %SkipNode = (
+        "imported_declaration" => 1,
+        "imported_module" => 1
+    );
+    
+    my %SkipAttr = (
+        "high_pc" => 1,
+        "frame_base" => 1,
+        "encoding" => 1
+    );
+    
+    my %Excess_IDs;
+    my %Delete_IDs;
+    my %Delete_Src;
+    
+    my $Lexical_Block = undef;
+    my $Subprogram_Block = undef;
+    
     while(($Import and $Line = $ImportedUnit{$Import}{$Import_Num}) or $Line = <$FH>)
     {
         if(not defined $ImportedUnit{$Import}{$Import_Num})
@@ -933,7 +990,15 @@ sub read_DWARF_Dump($$)
         {
             my ($Attr, $Val) = ($1, $2);
             
-            if($Kind eq "imported_unit")
+            if($Kind eq "member"
+            or $Kind eq "formal_parameter")
+            {
+                if($Attr eq "decl_file" or $Attr eq "decl_line")
+                {
+                    $Delete_Src{$ID} = 1;
+                }
+            }
+            elsif($Kind eq "imported_unit")
             {
                 if($Attr eq "import")
                 {
@@ -946,6 +1011,14 @@ sub read_DWARF_Dump($$)
                             $UsedUnit{$Import} = 1;
                         }
                     }
+                }
+            }
+            
+            if($Kind ne "structure_type")
+            {
+                if($Attr eq "sibling")
+                {
+                    next;
                 }
             }
             
@@ -962,8 +1035,7 @@ sub read_DWARF_Dump($$)
                 }
                 next;
             }
-            
-            if($Attr eq "encoding")
+            elsif(defined $SkipAttr{$Attr})
             { # unused
                 next;
             }
@@ -1034,7 +1106,8 @@ sub read_DWARF_Dump($$)
             {
                 $Val=~s/\A\(.+?\)\s*//;
                 $Val=~s/\s*\(.+?\)\Z//;
-                if($Val eq "public") {
+                if($Val eq "public")
+                { # public by default
                     next;
                 }
             }
@@ -1098,7 +1171,7 @@ sub read_DWARF_Dump($$)
         elsif($Line=~/\A \[\s*(\w+)\](\s*)(\w+)/)
         {
             $ID = hex($1);
-            $NS = $2;
+            $NS = length($2);
             $Kind = $3;
             
             if($Import or not $Primary)
@@ -1139,9 +1212,139 @@ sub read_DWARF_Dump($$)
                 }
             }
             
-            $DWARF_Info{$ID}{"Kind"} = $Kind;
-            $DWARF_Info{$ID}{"NS"} = length($NS);
+            if($Kind eq "lexical_block")
+            {
+                $Lexical_Block = $NS;
+                $Delete_IDs{$ID} = 1;
+            }
+            else
+            {
+                if(defined $Lexical_Block)
+                {
+                    if($NS>$Lexical_Block)
+                    {
+                        $Delete_IDs{$ID} = 1;
+                    }
+                    else
+                    { # end of lexical block
+                        $Lexical_Block = undef;
+                    }
+                }
+            }
             
+            if($Kind eq "subprogram")
+            {
+                $Subprogram_Block = $NS;
+            }
+            else
+            {
+                if(defined $Subprogram_Block)
+                {
+                    if($NS>$Subprogram_Block)
+                    {
+                        if($Kind eq "variable")
+                        { # temp variables
+                            $Delete_IDs{$ID} = 1;
+                        }
+                    }
+                    else
+                    { # end of subprogram block
+                        $Subprogram_Block = undef;
+                    }
+                }
+            }
+            
+            if(defined $ID_Pre)
+            {
+                my $Kind_Pre = $DWARF_Info{$ID_Pre}{"Kind"};
+                
+                if(defined $SkipNode{$Kind_Pre}) {
+                    $Delete_IDs{$ID_Pre} = 1;
+                }
+                
+                if(my $Sp = $DWARF_Info{$ID_Pre}{"specification"})
+                {
+                    if(defined $Delete_Src{$Sp})
+                    {
+                        delete($Delete_Src{$Sp});
+                    }
+                }
+                
+                if(defined $OptMem)
+                { # optimize memory usage
+                    if($Kind_Pre eq "subprogram")
+                    {
+                        my $Mangled = get_Mangled($ID_Pre);
+                        
+                        if($Mangled)
+                        {
+                            if(my $OLD_ID = $Mangled_Subs{$Mangled})
+                            {
+                                if(keys(%{$DWARF_Info{$OLD_ID}})==keys(%{$DWARF_Info{$ID_Pre}}))
+                                {
+                                    if(getSource($OLD_ID) eq getSource($ID_Pre))
+                                    {
+                                        $Excess_IDs{$ID_Pre} = 1;
+                                    }
+                                }
+                            }
+                            else {
+                                $Mangled_Subs{$Mangled} = $ID_Pre;
+                            }
+                        }
+                        
+                        if(not $Excess_IDs{$ID_Pre})
+                        {
+                            if(my $Sp = $DWARF_Info{$ID_Pre}{"specification"})
+                            {
+                                delete($Excess_IDs{$Sp});
+                            }
+                            elsif(my $Orig = $DWARF_Info{$ID_Pre}{"abstract_origin"})
+                            {
+                                delete($Excess_IDs{$Orig});
+                            }
+                            
+                        }
+                    }
+                    elsif($NS==4)
+                    { # simple types
+                        if($Kind_Pre=~/typedef|base_type|structure_type/)
+                        {
+                            my $Name = $DWARF_Info{$ID_Pre}{"name"};
+                            if(not $Name)
+                            {
+                                if(my $Sp = $DWARF_Info{$ID_Pre}{"specification"})
+                                {
+                                    $Name = $DWARF_Info{$Sp}{"name"};
+                                }
+                            }
+                            
+                            if($Name)
+                            {
+                                if(my $OLD_ID = $Simple_Types{$Name})
+                                {
+                                    if(keys(%{$DWARF_Info{$OLD_ID}})==keys(%{$DWARF_Info{$ID_Pre}}))
+                                    {
+                                        if(getSource($OLD_ID) eq getSource($ID_Pre))
+                                        {
+                                            $Excess_IDs{$ID_Pre} = 1;
+                                            $Type_Base{$ID_Pre} = $OLD_ID;
+                                        }
+                                    }
+                                }
+                                else {
+                                    $Simple_Types{$Name} = $ID_Pre;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            $DWARF_Info{$ID}{"Kind"} = $Kind;
+            $DWARF_Info{$ID}{"NS"} = $NS;
+            
+            $ID_Pre = $ID;
             
             if(defined $CUnit) {
                 $DWARF_Info{$ID}{"CompUnit"} = $CUnit;
@@ -1157,6 +1360,8 @@ sub read_DWARF_Dump($$)
             $SYS_WORD = $1;
         }
     }
+    
+    %Mangled_Subs = ();
     
     foreach my $ID (keys(%Post_Change))
     {
@@ -1254,6 +1459,72 @@ sub read_DWARF_Dump($$)
     %ImportedDecl = ();
     %UsedUnit = ();
     %UsedDecl = ();
+    
+    foreach my $ID (keys(%Delete_IDs))
+    {
+        delete($DWARF_Info{$ID});
+    }
+    
+    %Delete_IDs = ();
+    
+    foreach my $ID (keys(%Delete_Src))
+    {
+        delete($DWARF_Info{$ID}{"decl_file"});
+        delete($DWARF_Info{$ID}{"decl_line"});
+    }
+    
+    %Delete_Src = ();
+    
+    if(defined $OptMem)
+    { # optimize memory usage
+        foreach my $ID (sort {int($a)<=>int($b)} keys(%DWARF_Info))
+        {
+            foreach my $Attr ("type", "sibling", "specification")
+            {
+                if(defined $DWARF_Info{$ID}{$Attr})
+                {
+                    my $Val = $DWARF_Info{$ID}{$Attr};
+                    if(defined $Type_Base{$Val})
+                    {
+                        $DWARF_Info{$ID}{$Attr} = $Type_Base{$Val};
+                    }
+                }
+            }
+        }
+        
+        my $NS_Del = undef;
+        
+        foreach my $ID (sort {int($a)<=>int($b)} keys(%DWARF_Info))
+        {
+            if($Excess_IDs{$ID})
+            { # node
+                $NS_Del = $DWARF_Info{$ID}{"NS"};
+                delete($DWARF_Info{$ID});
+            }
+            else
+            { # sub-node
+                if(defined $NS_Del)
+                {
+                    if($DWARF_Info{$ID}{"NS"}<=$NS_Del)
+                    { # other node
+                        $NS_Del = undef;
+                    }
+                    else
+                    { # subprogram/types internals
+                        if($DWARF_Info{$ID}{"Kind"}!~/(typedef|_type)\Z/)
+                        {
+                            delete($DWARF_Info{$ID});
+                        }
+                        else {
+                            $DWARF_Info{$ID}{"NS"} = $NS_Del;
+                        }
+                    }
+                }
+            }
+        }
+        
+        %Excess_IDs = ();
+    }
 }
 
 sub read_Vtables($)
@@ -1400,6 +1671,15 @@ sub read_ABI()
         my $NS = $DWARF_Info{$ID}{"NS"};
         my $Scope = $CurID{$NS-2};
         
+        if($Kind eq "typedef")
+        {
+            if($DWARF_Info{$Scope}{"Kind"} eq "subprogram")
+            {
+                $NS = $DWARF_Info{$Scope}{"NS"};
+                $Scope = $CurID{$NS-2};
+            }
+        }
+        
         my $IsType = ($Kind=~/(struct|structure|class|union|enumeration|subroutine|array)_type/);
         
         if($IsType
@@ -1436,11 +1716,19 @@ sub read_ABI()
                 $SpecElem{$Spec} = $ID;
             }
             
+            if(my $Orig = $DWARF_Info{$ID}{"abstract_origin"}) {
+                $OrigElem{$Orig} = $ID;
+            }
+            
             if($IsType)
             {
                 if(not $DWARF_Info{$ID}{"name"}
-                and $DWARF_Info{$ID}{"linkage_name"}) {
+                and $DWARF_Info{$ID}{"linkage_name"})
+                {
                     $DWARF_Info{$ID}{"name"} = unmangleString($DWARF_Info{$ID}{"linkage_name"});
+                    
+                    # free memory
+                    delete($DWARF_Info{$ID}{"linkage_name"});
                 }
             }
         }
@@ -1473,6 +1761,9 @@ sub read_ABI()
                 $In{"virtual"} = 1;
             }
             $Inheritance{$Scope}{keys(%{$Inheritance{$Scope}})} = \%In;
+            
+            # free memory
+            delete($DWARF_Info{$ID});
         }
         elsif($Kind eq "formal_parameter")
         {
@@ -1488,6 +1779,9 @@ sub read_ABI()
             if((my $Bound = $DWARF_Info{$ID}{"upper_bound"}) ne "") {
                 $ArrayCount{$Scope} = $Bound + 1;
             }
+            
+            # free memory
+            delete($DWARF_Info{$ID});
         }
     }
     
@@ -1578,6 +1872,9 @@ sub read_ABI()
         $Incomplete_TN{$Type}{$Name} = 1;
     }
     
+    # free memory
+    %Incomplete_TN = ();
+    
     foreach my $Tid (sort {int($a) <=> int($b)} keys(%Incomplete))
     {
         my $Name = $TypeInfo{$Tid}{"Name"};
@@ -1614,6 +1911,9 @@ sub read_ABI()
             }
         }
     }
+    
+    # free memory
+    %Incomplete = ();
     
     my %Delete = ();
     
@@ -1667,6 +1967,18 @@ sub read_ABI()
         }
         
         delete($TypeInfo{$Tid});
+    }
+    
+    # free memory
+    %Delete = ();
+    foreach (keys(%DWARF_Info))
+    {
+        if(my $Kind = $DWARF_Info{$_}{"Kind"})
+        {
+            if(defined $TypeType{$Kind}) {
+                delete($DWARF_Info{$_});
+            }
+        }
     }
     
     foreach my $ID (sort {int($a) <=> int($b)} keys(%DWARF_Info))
@@ -1768,10 +2080,11 @@ sub read_ABI()
         
         if(defined $SymbolInfo{$ID}{"Source"})
         {
-            if(not defined $SymbolInfo{$ID}{"Header"}) {
+            if(not defined $SymbolInfo{$ID}{"Header"})
+            {
                 $SymbolInfo{$ID}{"Line"} = $SymbolInfo{$ID}{"SourceLine"};
+                delete($SymbolInfo{$ID}{"SourceLine"});
             }
-            delete($SymbolInfo{$ID}{"SourceLine"});
         }
         
         my $S = selectSymbol($ID);
@@ -1802,6 +2115,13 @@ sub read_ABI()
         
         delete($SymbolInfo{$ID}{"External"});
     }
+    
+    #use Devel::Size qw(size total_size);
+    #print keys(%DWARF_Info)." ".(total_size(\%DWARF_Info)/(1024*1024))." Mb ".localtime(time)."\n";
+    #print keys(%TypeInfo)." ".(total_size(\%TypeInfo)/(1024*1024))." Mb ".localtime(time)."\n";
+    #print keys(%SymbolInfo)." ".(total_size(\%SymbolInfo)/(1024*1024))." Mb ".localtime(time)."\n";
+    
+    #writeFile("out.txt", Dumper(\%DWARF_Info));
 }
 
 sub cloneSymbol($$)
@@ -1861,10 +2181,16 @@ sub selectSymbol($)
         {
             return 0;
         }
+        
         if($SymbolInfo{$ID}{"Data"}
         or $SymbolInfo{$ID}{"InLine"}
         or $SymbolInfo{$ID}{"PureVirt"})
         {
+            if(not $SymbolInfo{$ID}{"External"})
+            { # skip static
+                return 0;
+            }
+            
             if(defined $BinOnly)
             { # data, inline, pure
                 return 0;
@@ -2197,7 +2523,7 @@ sub getTypeInfo($)
         $TInfo{"Size"} = $Size;
     }
     
-    setSource(\%TInfo, $ID, $DWARF_Info{$ID}{"decl_file"}, $DWARF_Info{$ID}{"decl_line"});
+    setSource(\%TInfo, $ID);
     
     if(not $DWARF_Info{$ID}{"name"}
     and my $Spec = $DWARF_Info{$ID}{"specification"}) {
@@ -2504,10 +2830,11 @@ sub getTypeInfo($)
     
     if(defined $TInfo{"Source"})
     {
-        if(not defined $TInfo{"Header"}) {
+        if(not defined $TInfo{"Header"})
+        {
             $TInfo{"Line"} = $TInfo{"SourceLine"};
+            delete($TInfo{"SourceLine"});
         }
-        delete($TInfo{"SourceLine"});
     }
     
     foreach my $Attr (keys(%TInfo)) {
@@ -2531,9 +2858,12 @@ sub getTypeInfo($)
     }
 }
 
-sub setSource($$$$)
+sub setSource($$)
 {
-    my ($R, $ID, $File, $Line) = @_;
+    my ($R, $ID) = @_;
+    
+    my $File = $DWARF_Info{$ID}{"decl_file"};
+    my $Line = $DWARF_Info{$ID}{"decl_line"};
     
     my $Unit = $DWARF_Info{$ID}{"CompUnit"};
     
@@ -2789,6 +3119,7 @@ sub getSymbolInfo($)
     {
         if(my $OLD_ID = $Mangled_ID{$MnglName})
         { # duplicates
+            #print Dumper($DWARF_Info{$ID})." $OLD_ID $ID\n" if($MnglName eq "_ZSt22__uninitialized_move_aIPSsS0_SaISsEET0_T_S3_S2_RT1_");
             if(defined $Checked_Spec{$MnglName}
             or not $DWARF_Info{$ID}{"specification"})
             { # add spec info
@@ -2797,9 +3128,15 @@ sub getSymbolInfo($)
                 {
                     if($DWARF_Info{$ID}{"decl_file"} ne $DWARF_Info{$OLD_ID}{"decl_file"})
                     {
-                        setSource($SymbolInfo{$OLD_ID}, $ID, $DWARF_Info{$ID}{"decl_file"}, $DWARF_Info{$ID}{"decl_line"});
+                        setSource($SymbolInfo{$OLD_ID}, $ID);
                     }
                 }
+                
+                if(not defined $SpecElem{$ID}
+                and not defined $OrigElem{$ID}) {
+                    delete($DWARF_Info{$ID});
+                }
+                
                 return;
             }
         }
@@ -2831,6 +3168,13 @@ sub getSymbolInfo($)
     
     if(isExternal($ID)) {
         $SInfo{"External"} = 1;
+    }
+    
+    if(my $Orig = $DWARF_Info{$ID}{"abstract_origin"})
+    {
+        if(isExternal($Orig)) {
+            $SInfo{"External"} = 1;
+        }
     }
     
     if(index($MnglName, "_ZNVK")==0)
@@ -2876,16 +3220,13 @@ sub getSymbolInfo($)
                 }
             }
             
-            my %OrigInfo = %{$DWARF_Info{$Orig}};
-            
-            setSource(\%SInfo, $Orig, $OrigInfo{"decl_file"}, $OrigInfo{"decl_line"});
+            setSource(\%SInfo, $Orig);
             
             if(my $Spec = $DWARF_Info{$Orig}{"specification"})
             {
-                my %SpecInfo = %{$DWARF_Info{$Spec}};
-                setSource(\%SInfo, $Spec, $SpecInfo{"decl_file"}, $SpecInfo{"decl_line"});
+                setSource(\%SInfo, $Spec);
                 
-                $SInfo{"ShortName"} = $SpecInfo{"name"};
+                $SInfo{"ShortName"} = $DWARF_Info{$Spec}{"name"};
                 if($D) {
                     $SInfo{"ShortName"}=~s/\A\~//g;
                 }
@@ -2943,9 +3284,8 @@ sub getSymbolInfo($)
         {
             if($DWARF_Info{$Spec}{"Kind"} eq "member")
             {
-                my %SpecInfo = %{$DWARF_Info{$Spec}};
-                setSource(\%SInfo, $Spec, $SpecInfo{"decl_file"}, $SpecInfo{"decl_line"});
-                $SInfo{"ShortName"} = $SpecInfo{"name"};
+                setSource(\%SInfo, $Spec);
+                $SInfo{"ShortName"} = $DWARF_Info{$Spec}{"name"};
                 
                 if(my $NSp = $NameSpace{$Spec})
                 {
@@ -3038,7 +3378,7 @@ sub getSymbolInfo($)
         }
     }
     
-    setSource(\%SInfo, $ID, $DWARF_Info{$ID}{"decl_file"}, $DWARF_Info{$ID}{"decl_line"});
+    setSource(\%SInfo, $ID);
     
     my $PPos = 0;
     
@@ -4037,9 +4377,13 @@ sub scenario()
     %Inheritance = ();
     %NameSpace = ();
     %SpecElem = ();
+    %OrigElem = ();
     %ClassMethods = ();
     %TypeSpec = ();
     %ClassChild = ();
+    
+    %VirtualTable = ();
+    %SymbolTable = ();
     
     dump_ABI();
     
