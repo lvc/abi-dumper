@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.99.6
+# ABI Dumper 0.99.7
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013 ROSA Laboratory
@@ -43,7 +43,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.99.6";
+my $TOOL_VERSION = "0.99.7";
 my $ABI_DUMP_VERSION = "3.2";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -244,6 +244,7 @@ my %RegName;
 
 my $STDCXX_TARGET = 0;
 my $GLOBAL_ID = 0;
+my %ANON_TYPE = ();
 
 my %Mangled_ID;
 my %Checked_Spec;
@@ -271,7 +272,7 @@ my %Qual = (
     "Const"=>"const"
 );
 
-my $HEADER_EXT = "h|hh|hp|hxx|hpp|h\\+\\+";
+my $HEADER_EXT = "h|hh|hp|hxx|hpp|h\\+\\+|tcc";
 my $SRC_EXT = "c|cpp|cxx|c\\+\\+";
 
 # Other
@@ -893,7 +894,7 @@ sub getSource($)
     if(defined $DWARF_Info{$ID}{"decl_file"})
     {
         my $File = $DWARF_Info{$ID}{"decl_file"};
-        my $Unit = $DWARF_Info{$ID}{"CompUnit"};
+        my $Unit = $DWARF_Info{$ID}{"Unit"};
         
         my $Name = undef;
         
@@ -967,12 +968,19 @@ sub read_DWARF_Dump($$)
         "encoding" => 1
     );
     
+    my %MarkByUnit = (
+        "member" => 1,
+        "subprogram" => 1,
+        "variable" => 1
+    );
+    
     my %Excess_IDs;
-    my %Delete_IDs;
     my %Delete_Src;
     
     my $Lexical_Block = undef;
+    my $Inlined_Block = undef;
     my $Subprogram_Block = undef;
+    my $Skip_Block = undef;
     
     while(($Import and $Line = $ImportedUnit{$Import}{$Import_Num}) or $Line = <$FH>)
     {
@@ -988,6 +996,11 @@ sub read_DWARF_Dump($$)
         }
         if($ID and $Line=~/\A\s*(\w+)\s*(.+?)\s*\Z/)
         {
+            
+            if(defined $Skip_Block) {
+                next;
+            }
+            
             my ($Attr, $Val) = ($1, $2);
             
             if($Kind eq "member"
@@ -1011,6 +1024,14 @@ sub read_DWARF_Dump($$)
                             $UsedUnit{$Import} = 1;
                         }
                     }
+                }
+            }
+            
+            if($Kind eq "member")
+            {
+                if($Attr eq "data_member_location")
+                {
+                    delete($DWARF_Info{$ID}{"Unit"});
                 }
             }
             
@@ -1174,6 +1195,81 @@ sub read_DWARF_Dump($$)
             $NS = length($2);
             $Kind = $3;
             
+            $Skip_Block = undef;
+            
+            if(defined $SkipNode{$Kind})
+            {
+                $Skip_Block = 1;
+                next;
+            }
+            
+            if($Kind eq "lexical_block")
+            {
+                $Lexical_Block = $NS;
+                $Skip_Block = 1;
+                next;
+            }
+            else
+            {
+                if(defined $Lexical_Block)
+                {
+                    if($NS>$Lexical_Block)
+                    {
+                        $Skip_Block = 1;
+                        next;
+                    }
+                    else
+                    { # end of lexical block
+                        $Lexical_Block = undef;
+                    }
+                }
+            }
+            
+            if($Kind eq "inlined_subroutine")
+            {
+                $Inlined_Block = $NS;
+                $Skip_Block = 1;
+                next;
+            }
+            else
+            {
+                if(defined $Inlined_Block)
+                {
+                    if($NS>$Inlined_Block)
+                    {
+                        $Skip_Block = 1;
+                        next;
+                    }
+                    else
+                    { # end of inlined subroutine
+                        $Inlined_Block = undef;
+                    }
+                }
+            }
+            
+            if($Kind eq "subprogram")
+            {
+                $Subprogram_Block = $NS;
+            }
+            else
+            {
+                if(defined $Subprogram_Block)
+                {
+                    if($NS>$Subprogram_Block)
+                    {
+                        if($Kind eq "variable")
+                        { # temp variables
+                            $Skip_Block = 1;
+                            next;
+                        }
+                    }
+                    else
+                    { # end of subprogram block
+                        $Subprogram_Block = undef;
+                    }
+                }
+            }
+            
             if($Import or not $Primary)
             {
                 $ID = -$ID;
@@ -1212,55 +1308,9 @@ sub read_DWARF_Dump($$)
                 }
             }
             
-            if($Kind eq "lexical_block")
-            {
-                $Lexical_Block = $NS;
-                $Delete_IDs{$ID} = 1;
-            }
-            else
-            {
-                if(defined $Lexical_Block)
-                {
-                    if($NS>$Lexical_Block)
-                    {
-                        $Delete_IDs{$ID} = 1;
-                    }
-                    else
-                    { # end of lexical block
-                        $Lexical_Block = undef;
-                    }
-                }
-            }
-            
-            if($Kind eq "subprogram")
-            {
-                $Subprogram_Block = $NS;
-            }
-            else
-            {
-                if(defined $Subprogram_Block)
-                {
-                    if($NS>$Subprogram_Block)
-                    {
-                        if($Kind eq "variable")
-                        { # temp variables
-                            $Delete_IDs{$ID} = 1;
-                        }
-                    }
-                    else
-                    { # end of subprogram block
-                        $Subprogram_Block = undef;
-                    }
-                }
-            }
-            
             if(defined $ID_Pre)
             {
                 my $Kind_Pre = $DWARF_Info{$ID_Pre}{"Kind"};
-                
-                if(defined $SkipNode{$Kind_Pre}) {
-                    $Delete_IDs{$ID_Pre} = 1;
-                }
                 
                 if(my $Sp = $DWARF_Info{$ID_Pre}{"specification"})
                 {
@@ -1303,7 +1353,6 @@ sub read_DWARF_Dump($$)
                             {
                                 delete($Excess_IDs{$Orig});
                             }
-                            
                         }
                     }
                     elsif($NS==4)
@@ -1346,8 +1395,12 @@ sub read_DWARF_Dump($$)
             
             $ID_Pre = $ID;
             
-            if(defined $CUnit) {
-                $DWARF_Info{$ID}{"CompUnit"} = $CUnit;
+            if(defined $CUnit)
+            {
+                if(defined $MarkByUnit{$Kind}
+                or defined $TypeType{$Kind}) {
+                    $DWARF_Info{$ID}{"Unit"} = $CUnit;
+                }
             }
             
             if(not defined $ID_Shift) {
@@ -1459,13 +1512,6 @@ sub read_DWARF_Dump($$)
     %ImportedDecl = ();
     %UsedUnit = ();
     %UsedDecl = ();
-    
-    foreach my $ID (keys(%Delete_IDs))
-    {
-        delete($DWARF_Info{$ID});
-    }
-    
-    %Delete_IDs = ();
     
     foreach my $ID (keys(%Delete_Src))
     {
@@ -1654,7 +1700,7 @@ sub unmangleString($)
 sub read_ABI()
 {
     printMsg("INFO", "Extracting ABI information");
-
+    
     my %CurID = ();
     
     my @IDs = sort {int($a) <=> int($b)} keys(%DWARF_Info);
@@ -1680,13 +1726,15 @@ sub read_ABI()
             }
         }
         
+        if($Kind ne "subprogram") {
+            delete($DWARF_Info{$ID}{"NS"});
+        }
+        
         my $IsType = ($Kind=~/(struct|structure|class|union|enumeration|subroutine|array)_type/);
         
         if($IsType
         or $Kind eq "typedef"
         or $Kind eq "subprogram"
-        or $Kind eq "inlined_subroutine"
-        or $Kind eq "lexical_block"
         or $Kind eq "variable"
         or $Kind eq "namespace")
         {
@@ -1970,6 +2018,7 @@ sub read_ABI()
     }
     
     # free memory
+    # delete types info
     %Delete = ();
     foreach (keys(%DWARF_Info))
     {
@@ -2115,13 +2164,6 @@ sub read_ABI()
         
         delete($SymbolInfo{$ID}{"External"});
     }
-    
-    #use Devel::Size qw(size total_size);
-    #print keys(%DWARF_Info)." ".(total_size(\%DWARF_Info)/(1024*1024))." Mb ".localtime(time)."\n";
-    #print keys(%TypeInfo)." ".(total_size(\%TypeInfo)/(1024*1024))." Mb ".localtime(time)."\n";
-    #print keys(%SymbolInfo)." ".(total_size(\%SymbolInfo)/(1024*1024))." Mb ".localtime(time)."\n";
-    
-    #writeFile("out.txt", Dumper(\%DWARF_Info));
 }
 
 sub cloneSymbol($$)
@@ -2810,6 +2852,18 @@ sub getTypeInfo($)
             elsif($TInfo{"Source"}) {
                 $TInfo{"Name"} = "anon-".lc($TInfo{"Type"})."-".$TInfo{"Source"}."-".$TInfo{"SourceLine"};
             }
+            else
+            {
+                if(not defined $TypeMember{$ID})
+                {
+                    if(not defined $ANON_TYPE{$TInfo{"Type"}})
+                    {
+                        printMsg("WARNING", "a \"".$TInfo{"Type"}."\" type with no attributes detected in the DWARF dump ($ID)");
+                        $ANON_TYPE{$TInfo{"Type"}} = 1;
+                    }
+                    $TInfo{"Name"} = "anon-".lc($TInfo{"Type"});
+                }
+            }
             
             if($TInfo{"Name"} and $TInfo{"NameSpace"}) {
                 $TInfo{"Name"} = $TInfo{"NameSpace"}."::".$TInfo{"Name"};
@@ -2865,7 +2919,7 @@ sub setSource($$)
     my $File = $DWARF_Info{$ID}{"decl_file"};
     my $Line = $DWARF_Info{$ID}{"decl_line"};
     
-    my $Unit = $DWARF_Info{$ID}{"CompUnit"};
+    my $Unit = $DWARF_Info{$ID}{"Unit"};
     
     if(defined $File)
     {
@@ -2880,14 +2934,14 @@ sub setSource($$)
         }
         
         if($Name=~/\.($HEADER_EXT)\Z/)
-        {
+        { # header
             $R->{"Header"} = $Name;
             if(defined $Line) {
                 $R->{"Line"} = $Line;
             }
         }
         elsif($Name ne "<built-in>")
-        {
+        { # source
             $R->{"Source"} = $Name;
             if(defined $Line) {
                 $R->{"SourceLine"} = $Line;
@@ -3119,24 +3173,19 @@ sub getSymbolInfo($)
     {
         if(my $OLD_ID = $Mangled_ID{$MnglName})
         { # duplicates
-            #print Dumper($DWARF_Info{$ID})." $OLD_ID $ID\n" if($MnglName eq "_ZSt22__uninitialized_move_aIPSsS0_SaISsEET0_T_S3_S2_RT1_");
+            if(not defined $SymbolInfo{$OLD_ID}{"Header"}
+            or not defined $SymbolInfo{$OLD_ID}{"Source"})
+            {
+                setSource($SymbolInfo{$OLD_ID}, $ID);
+            }
+            
             if(defined $Checked_Spec{$MnglName}
             or not $DWARF_Info{$ID}{"specification"})
-            { # add spec info
-                if(not defined $SymbolInfo{$OLD_ID}{"Header"}
-                or not defined $SymbolInfo{$OLD_ID}{"Source"})
-                {
-                    if($DWARF_Info{$ID}{"decl_file"} ne $DWARF_Info{$OLD_ID}{"decl_file"})
-                    {
-                        setSource($SymbolInfo{$OLD_ID}, $ID);
-                    }
-                }
-                
+            {
                 if(not defined $SpecElem{$ID}
                 and not defined $OrigElem{$ID}) {
                     delete($DWARF_Info{$ID});
                 }
-                
                 return;
             }
         }
@@ -3697,6 +3746,10 @@ sub remove_Unused()
             delete($TypeInfo{$Tid});
         }
     }
+    
+    # clean memory
+    %MergedTypes = ();
+    %LocalType = ();
     
     # completeness
     foreach my $Tid (keys(%TypeInfo)) {
