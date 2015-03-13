@@ -54,7 +54,7 @@ my $VTABLE_DUMPER_VERSION = "1.0";
 my ($Help, $ShowVersion, $DumpVersion, $OutputDump, $SortDump, $StdOut,
 $TargetVersion, $ExtraInfo, $FullDump, $AllTypes, $AllSymbols, $BinOnly,
 $SkipCxx, $Loud, $AddrToName, $DumpStatic, $Compare, $AltDebugInfo,
-$OptMem);
+$DebugInfoDir, $OptMem);
 
 my $CmdName = get_filename($0);
 
@@ -109,6 +109,7 @@ GetOptions("h|help!" => \$Help,
   "dump-static!" => \$DumpStatic,
   "compare!" => \$Compare,
   "alt=s" => \$AltDebugInfo,
+  "debuginfo-dir=s" => \$DebugInfoDir,
   "mem!" =>\$OptMem,
 # internal options
   "addr2name!" => \$AddrToName
@@ -199,6 +200,10 @@ GENERAL OPTIONS:
       detected automatically from gnu_debugaltlink section
       of the input object if not specified.
       
+  -debuginfo-prefix PATH
+      prefix for debuginfo files (openSUSE) read from .gnu_debuglink
+      section.
+
   -mem
       Try to optimize system memory usage.
 ";
@@ -451,41 +456,10 @@ sub readline_ELF($)
     return @Info;
 }
 
-sub read_Symbols($)
+sub _read_symbols
 {
-    my $Lib_Path = $_[0];
-    my $Lib_Name = get_filename($Lib_Path);
-    
-    my $Dynamic = ($Lib_Name=~/\.so(\.|\Z)/);
-    my $Dbg = ($Lib_Name=~/\.debug\Z/);
-    
-    my $Readelf = "eu-readelf";
-    if(not check_Cmd($Readelf)) {
-        exitStatus("Not_Found", "can't find \"eu-readelf\"");
-    }
-    
-    my $Cmd = $Readelf." -S \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
-    foreach (split(/\n/, `$Cmd`))
-    {
-        if(/\[\s*(\d+)\]\s+([\w\.]+)/)
-        {
-            $SectionInfo{$1} = $2;
-        }
-    }
-    
-    if($Dynamic)
-    { # dynamic library specifics
-        $Cmd = $Readelf." -d \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
-        foreach (split(/\n/, `$Cmd`))
-        {
-            if(/NEEDED.+\[([^\[\]]+)\]/)
-            { # dependencies:
-              # 0x00000001 (NEEDED) Shared library: [libc.so.6]
-                $Library_Needed{$1} = 1;
-            }
-        }
-    }
-    
+    my ($Readelf, $file, $Dbg, $Dynamic) = @_;
+
     my $ExtraPath = "";
     
     if($ExtraInfo)
@@ -495,7 +469,7 @@ sub read_Symbols($)
         $ExtraPath .= "/elf-info";
     }
     
-    $Cmd = $Readelf." -s \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
+    $Cmd = $Readelf." -s \"$file\" 2>\"$TMP_DIR/error\"";
     
     if($ExtraPath)
     { # debug mode
@@ -573,7 +547,7 @@ sub read_Symbols($)
         }
     }
     close(LIB);
-    
+
     my %Found = ();
     foreach my $Symbol (keys(%{$Library_Symbol{$TargetName}}))
     {
@@ -620,6 +594,59 @@ sub read_Symbols($)
             $Found{$Symbol} = 1;
         }
     }
+}
+
+sub read_Symbols($)
+{
+    my $Lib_Path = $_[0];
+    my $Lib_Name = get_filename($Lib_Path);
+    my $Lib_Path_Symbols = $Lib_Path;
+    
+    my $Dynamic = ($Lib_Name=~/\.so(\.|\Z)/);
+    my $Dbg = ($Lib_Name=~/\.debug\Z/);
+    
+    my $Readelf = "eu-readelf";
+    if(not check_Cmd($Readelf)) {
+        exitStatus("Not_Found", "can't find \"eu-readelf\"");
+    }
+
+    my $Str = `$Readelf --string=.gnu_debuglink \"$Lib_Path\" 2>\"$TMP_DIR/error\"`;
+    if($Str=~/0\]\s*(.+)/) {
+        my $Name = $1;
+        printMsg("INFO", "found debug link in $Name");
+        $Dir = $DebugInfoDir if $DebugInfoDir;
+        $Lib_Path_Symbols = join('/', $Dir, $Name);
+        if (!-e $Lib_Path_Symbols)
+        {
+            printMsg("ERROR", "$Lib_Path_Symbols does not exist");
+            return 0;
+        }
+    }
+    
+    my $Cmd = $Readelf." -S \"$Lib_Path_Symbols\" 2>\"$TMP_DIR/error\"";
+    foreach (split(/\n/, `$Cmd`))
+    {
+        if(/\[\s*(\d+)\]\s+([\w\.]+)/)
+        {
+            $SectionInfo{$1} = $2;
+        }
+    }
+    
+    if($Dynamic)
+    { # dynamic library specifics
+        $Cmd = $Readelf." -d \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
+        foreach (split(/\n/, `$Cmd`))
+        {
+            if(/NEEDED.+\[([^\[\]]+)\]/)
+            { # dependencies:
+              # 0x00000001 (NEEDED) Shared library: [libc.so.6]
+                $Library_Needed{$1} = 1;
+            }
+        }
+    }
+    
+    _read_symbols($Readelf, $Lib_Path, $Dbg, $Dynamic);
+    _read_symbols($Readelf, $Lib_Path_Symbols, $Dbg, $Dynamic);
 }
 
 sub read_Alt_Info($)
@@ -730,6 +757,19 @@ sub read_DWARF_Info($)
     if(not check_Cmd($Readelf)) {
         exitStatus("Not_Found", "can't find \"$Readelf\" command");
     }
+
+    my $Str = `$Readelf --string=.gnu_debuglink \"$Path\" 2>\"$TMP_DIR/error\"`;
+    if($Str=~/0\]\s*(.+)/) {
+        my $Name = $1;
+        printMsg("INFO", "found debug link in $Name");
+        $Dir = $DebugInfoDir if $DebugInfoDir;
+        $Path = join('/', $Dir, $Name);
+        if (!-e $Path)
+        {
+            printMsg("ERROR", "$Path does not exist");
+            return 0;
+        }
+    }
     
     my $AddOpt = "";
     if(not defined $AddrToName)
@@ -744,7 +784,7 @@ sub read_DWARF_Info($)
         return 0;
     }
     
-    printMsg("INFO", "Reading debug-info");
+    printMsg("INFO", "Reading debug-info $Path");
     
     my $ExtraPath = "";
     
@@ -865,11 +905,11 @@ sub read_DWARF_Info($)
     }
     if($ExtraPath)
     {
-        system("$Readelf $AddOpt --debug-dump=info \"$Name\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        system("$Readelf $AddOpt --debug-dump=info \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
         open($INFO_fh, $ExtraPath);
     }
     else {
-        open($INFO_fh, "$Readelf $AddOpt --debug-dump=info \"$Name\" 2>\"$TMP_DIR/error\" |");
+        open($INFO_fh, "$Readelf $AddOpt --debug-dump=info \"$Path\" 2>\"$TMP_DIR/error\" |");
     }
     chdir($ORIG_DIR);
     
