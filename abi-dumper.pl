@@ -3,18 +3,18 @@
 # ABI Dumper 0.99.7
 # Dump ABI of an ELF object containing DWARF debug info
 #
-# Copyright (C) 2013 ROSA Laboratory
+# Copyright (C) 2012-2015 Andrey Ponomarenko's ABI Laboratory
 #
 # Written by Andrey Ponomarenko
 #
 # PLATFORMS
 # =========
-#  Linux, FreeBSD
+#  Linux
 #
 # REQUIREMENTS
 # ============
-#  Elfutils (eu-readelf)
 #  Perl 5 (5.8 or newer)
+#  Elfutils (eu-readelf)
 #  Vtable-Dumper (1.0 or newer)
 #
 # COMPATIBILITY
@@ -75,7 +75,7 @@ my %ERROR_CODE = (
 
 my $ShortUsage = "ABI Dumper $TOOL_VERSION
 Dump ABI of an ELF object containing DWARF debug info
-Copyright (C) 2013 ROSA Laboratory
+Copyright (C) 2015 Andrey Ponomarenko's ABI Laboratory
 License: GNU LGPL or GNU GPL
 
 Usage: $CmdName [options] [object]
@@ -4235,7 +4235,7 @@ sub scenario()
     }
     if($ShowVersion)
     {
-        printMsg("INFO", "ABI Dumper $TOOL_VERSION\nCopyright (C) 2013 ROSA Laboratory\nLicense: LGPL or GPL <http://www.gnu.org/licenses/>\nThis program is free software: you can redistribute it and/or modify it.\n\nWritten by Andrey Ponomarenko.");
+        printMsg("INFO", "ABI Dumper $TOOL_VERSION\nCopyright (C) 2015 Andrey Ponomarenko's ABI Laboratory\nLicense: LGPL or GPL <http://www.gnu.org/licenses/>\nThis program is free software: you can redistribute it and/or modify it.\n\nWritten by Andrey Ponomarenko.");
         exit(0);
     }
     if($DumpVersion)

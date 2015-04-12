@@ -1,9 +1,9 @@
 #!/usr/bin/perl
 ###########################################################################
 # Makefile for ABI Dumper
-# Install/remove the tool for GNU/Linux and FreeBSD
+# Install/remove the tool for GNU/Linux
 #
-# Copyright (C) 2012-2013 ROSA Laboratory
+# Copyright (C) 2012-2015 Andrey Ponomarenko's ABI Laboratory
 #
 # Written by Andrey Ponomarenko
 #

@@ -1,5 +1,5 @@
 
-Copyright (C) 2012-2013 ROSA Laboratory
+Copyright (C) 2012-2015 Andrey Ponomarenko's ABI laboratory
 All rights reserved.
 
 
@@ -24,8 +24,8 @@ Content:
 1. REQUIREMENTS FOR LINUX AND FREEBSD
 =====================================
 
-   1. Elfutils (eu-readelf)
-   2. Perl 5 (5.8 or newer)
+   1. Perl 5 (5.8 or newer)
+   2. Elfutils (eu-readelf)
    3. Vtable-Dumper (1.0 or newer)
 
 
