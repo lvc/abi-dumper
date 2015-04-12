@@ -8,8 +8,8 @@ INSTALL:
   sudo perl Makefile.pl -install --prefix=/usr
   
 REQUIRES:
-  Elfutils (eu-readelf)
   Perl 5 (5.8 or newer)
+  Elfutils (eu-readelf)
   Vtable Dumper (1.0 or newer, https://github.com/lvc/vtable-dumper)
 
 USAGE:
