@@ -1,13 +1,13 @@
 
-Copyright (C) 2012-2015 Andrey Ponomarenko's ABI laboratory
+Copyright (C) 2013-2015 Andrey Ponomarenko's ABI Laboratory
 All rights reserved.
 
 
 RELEASE INFORMATION
 
 Project:           ABI Dumper
-Version:           0.99.8.1
-Date:              2015-04-12
+Version:           0.99.9
+Date:              2015-08-14
 
 
 This file explains how to install and setup environment
@@ -36,15 +36,11 @@ Content:
    This command will install an abi-dumper program in the
    PREFIX/bin system directory:
 
-     sudo perl Makefile.pl -install --prefix=PREFIX [/usr, /usr/local, ...]
+     sudo make install prefix=PREFIX [/usr, /usr/local, ...]
 
-4.1 Update
+4.1 Remove
 
-     sudo perl Makefile.pl -update --prefix=PREFIX
-
-4.2 Remove
-
-     sudo perl Makefile.pl -remove --prefix=PREFIX
+     sudo make uninstall prefix=PREFIX
 
 
 

@@ -1,9 +1,9 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.99.8.1
+# ABI Dumper 0.99.9
 # Dump ABI of an ELF object containing DWARF debug info
 #
-# Copyright (C) 2012-2015 Andrey Ponomarenko's ABI Laboratory
+# Copyright (C) 2013-2015 Andrey Ponomarenko's ABI Laboratory
 #
 # Written by Andrey Ponomarenko
 #
@@ -15,7 +15,7 @@
 # ============
 #  Perl 5 (5.8 or newer)
 #  Elfutils (eu-readelf)
-#  Vtable-Dumper (1.0 or newer)
+#  Vtable-Dumper (1.1 or newer)
 #
 # COMPATIBILITY
 # =============
@@ -43,7 +43,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.99.8.1";
+my $TOOL_VERSION = "0.99.9";
 my $ABI_DUMP_VERSION = "3.2";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -51,10 +51,12 @@ my $TMP_DIR = tempdir(CLEANUP=>1);
 my $VTABLE_DUMPER = "vtable-dumper";
 my $VTABLE_DUMPER_VERSION = "1.0";
 
+my $EU_READELF = "eu-readelf";
+
 my ($Help, $ShowVersion, $DumpVersion, $OutputDump, $SortDump, $StdOut,
 $TargetVersion, $ExtraInfo, $FullDump, $AllTypes, $AllSymbols, $BinOnly,
 $SkipCxx, $Loud, $AddrToName, $DumpStatic, $Compare, $AltDebugInfo,
-$OptMem);
+$OptMem, $AddDirs);
 
 my $CmdName = get_filename($0);
 
@@ -110,6 +112,7 @@ GetOptions("h|help!" => \$Help,
   "compare!" => \$Compare,
   "alt=s" => \$AltDebugInfo,
   "mem!" =>\$OptMem,
+  "dir!" =>\$AddDirs,
 # internal options
   "addr2name!" => \$AddrToName
 ) or ERR_MESSAGE();
@@ -129,8 +132,8 @@ DESCRIPTION:
   ABI Dumper is a tool for dumping ABI information of an ELF object
   containing DWARF debug info.
   
-  The tool is intended to be used with ABI Compliance Checker tool for tracking
-  ABI changes of a C/C++ library or kernel module.
+  The tool is intended to be used with ABI Compliance Checker tool for
+  tracking ABI changes of a C/C++ library or kernel module.
 
   This tool is free software: you can redistribute it and/or modify it
   under the terms of the GNU LGPL or GNU GPL.
@@ -201,6 +204,9 @@ GENERAL OPTIONS:
       
   -mem
       Try to optimize system memory usage.
+      
+  -dir
+      Show full paths of source files.
 ";
 
 sub HELP_MESSAGE() {
@@ -262,7 +268,8 @@ my %TypeType = (
     "reference_type"=>"Ref",
     "volatile_type"=>"Volatile",
     "typedef"=>"Typedef",
-    "ptr_to_member_type"=>"FieldPtr"
+    "ptr_to_member_type"=>"FieldPtr",
+    "string_type"=>"String"
 );
 
 my %Qual = (
@@ -302,6 +309,9 @@ my $SYS_GCCV;
 my $SYS_COMP;
 
 my $LIB_LANG;
+
+# Errors
+my $InvalidDebugLoc;
 
 sub printMsg($$)
 {
@@ -459,12 +469,11 @@ sub read_Symbols($)
     my $Dynamic = ($Lib_Name=~/\.so(\.|\Z)/);
     my $Dbg = ($Lib_Name=~/\.debug\Z/);
     
-    my $Readelf = "eu-readelf";
-    if(not check_Cmd($Readelf)) {
+    if(not check_Cmd($EU_READELF)) {
         exitStatus("Not_Found", "can't find \"eu-readelf\"");
     }
     
-    my $Cmd = $Readelf." -S \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
+    my $Cmd = $EU_READELF." -S \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
     foreach (split(/\n/, `$Cmd`))
     {
         if(/\[\s*(\d+)\]\s+([\w\.]+)/)
@@ -475,7 +484,7 @@ sub read_Symbols($)
     
     if($Dynamic)
     { # dynamic library specifics
-        $Cmd = $Readelf." -d \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
+        $Cmd = $EU_READELF." -d \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
         foreach (split(/\n/, `$Cmd`))
         {
             if(/NEEDED.+\[([^\[\]]+)\]/)
@@ -486,16 +495,15 @@ sub read_Symbols($)
         }
     }
     
-    my $ExtraPath = "";
+    my $ExtraPath = undef;
     
     if($ExtraInfo)
     {
-        $ExtraPath = $ExtraInfo."/".$Lib_Name;
-        mkpath($ExtraPath);
-        $ExtraPath .= "/elf-info";
+        mkpath($ExtraInfo);
+        $ExtraPath = $ExtraInfo."/elf-info";
     }
     
-    $Cmd = $Readelf." -s \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
+    $Cmd = $EU_READELF." -s \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
     
     if($ExtraPath)
     { # debug mode
@@ -627,9 +635,8 @@ sub read_Alt_Info($)
     my $Path = $_[0];
     my $Name = get_filename($Path);
     
-    my $Readelf = "eu-readelf";
-    if(not check_Cmd($Readelf)) {
-        exitStatus("Not_Found", "can't find \"$Readelf\" command");
+    if(not check_Cmd($EU_READELF)) {
+        exitStatus("Not_Found", "can't find \"$EU_READELF\" command");
     }
     
     printMsg("INFO", "Reading alternate debug-info");
@@ -637,31 +644,60 @@ sub read_Alt_Info($)
     my $ExtraPath = undef;
     
     # lines info
-    
     if($ExtraInfo)
     {
-        $ExtraPath = $ExtraInfo."/".$Name;
+        $ExtraPath = $ExtraInfo."/alt";
         mkpath($ExtraPath);
         $ExtraPath .= "/debug_line";
     }
     
     if($ExtraPath)
     {
-        system("$Readelf -N --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        system($EU_READELF." -N --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
         open(SRC, $ExtraPath);
     }
     else {
-        open(SRC, "$Readelf -N --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" |");
+        open(SRC, $EU_READELF." -N --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" |");
     }
     
-    my $Offset = undef;
+    my $DirTable_Def = undef;
+    my %DirTable = ();
     
     while(<SRC>)
     {
-        if(/(\d+)\s+\d+\s+\d+\s+\d+\s+([^ ]+)/)
+        if(defined $AddDirs)
         {
-            my ($Num, $File) = ($1, $2);
+            if(/Directory table/i)
+            {
+                $DirTable_Def = 1;
+                next;
+            }
+            elsif(/File name table/i)
+            {
+                $DirTable_Def = undef;
+                next;
+            }
+            
+            if(defined $DirTable_Def)
+            {
+                if(/\A\s*(.+?)\Z/) {
+                    $DirTable{keys(%DirTable)+1} = $1;
+                }
+            }
+        }
+        
+        if(/(\d+)\s+(\d+)\s+\d+\s+\d+\s+([^ ]+)/)
+        {
+            my ($Num, $Dir, $File) = ($1, $2, $3);
             chomp($File);
+            
+            if(defined $AddDirs)
+            {
+                if(my $DName = $DirTable{$Dir})
+                {
+                    $File = $DName."/".$File;
+                }
+            }
             
             $SourceFile_Alt{0}{$Num} = $File;
         }
@@ -669,21 +705,20 @@ sub read_Alt_Info($)
     close(SRC);
     
     # debug info
-    
     if($ExtraInfo)
     {
-        $ExtraPath = $ExtraInfo."/".$Name;
+        $ExtraPath = $ExtraInfo."/alt";
         mkpath($ExtraPath);
         $ExtraPath .= "/debug_info";
     }
     
     if($ExtraPath)
     {
-        system("$Readelf -N --debug-dump=info \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        system($EU_READELF." -N --debug-dump=info \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
         open(INFO, $ExtraPath);
     }
     else {
-        open(INFO, "$Readelf -N --debug-dump=info \"$Path\" 2>\"$TMP_DIR/error\" |");
+        open(INFO, $EU_READELF." -N --debug-dump=info \"$Path\" 2>\"$TMP_DIR/error\" |");
     }
     
     my $ID = undef;
@@ -726,9 +761,8 @@ sub read_DWARF_Info($)
     my $Dir = get_dirname($Path);
     my $Name = get_filename($Path);
     
-    my $Readelf = "eu-readelf";
-    if(not check_Cmd($Readelf)) {
-        exitStatus("Not_Found", "can't find \"$Readelf\" command");
+    if(not check_Cmd($EU_READELF)) {
+        exitStatus("Not_Found", "can't find \"$EU_READELF\" command");
     }
     
     my $AddOpt = "";
@@ -737,7 +771,7 @@ sub read_DWARF_Info($)
         $AddOpt .= " -N";
     }
     
-    my $Sect = `$Readelf -S \"$Path\" 2>\"$TMP_DIR/error\"`;
+    my $Sect = `$EU_READELF -S \"$Path\" 2>\"$TMP_DIR/error\"`;
     
     if($Sect!~/\.debug_info/)
     { # No DWARF info
@@ -746,23 +780,22 @@ sub read_DWARF_Info($)
     
     printMsg("INFO", "Reading debug-info");
     
-    my $ExtraPath = "";
+    my $ExtraPath = undef;
     
     # ELF header
     if($ExtraInfo)
     {
-        $ExtraPath = $ExtraInfo."/".$Name;
-        mkpath($ExtraPath);
-        $ExtraPath .= "/elf-header";
+        mkpath($ExtraInfo);
+        $ExtraPath = $ExtraInfo."/elf-header";
     }
     
     if($ExtraPath)
     {
-        system($Readelf." -h \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        system($EU_READELF." -h \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
         open(HEADER, $ExtraPath);
     }
     else {
-        open(HEADER, $Readelf." -h \"$Path\" 2>\"$TMP_DIR/error\" |");
+        open(HEADER, $EU_READELF." -h \"$Path\" 2>\"$TMP_DIR/error\" |");
     }
     
     my %Header = ();
@@ -788,36 +821,79 @@ sub read_DWARF_Info($)
         $SYS_ARCH = "x86_64";
     }
     
-    # source info
+    # ELF sections
     if($ExtraInfo)
     {
-        $ExtraPath = $ExtraInfo."/".$Name;
-        mkpath($ExtraPath);
-        $ExtraPath .= "/debug_line";
+        mkpath($ExtraInfo);
+        $ExtraPath = $ExtraInfo."/elf-sections";
     }
     
     if($ExtraPath)
     {
-        system("$Readelf $AddOpt --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        system($EU_READELF." -S \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        open(HEADER, $ExtraPath);
+    }
+    
+    # source info
+    if($ExtraInfo)
+    {
+        mkpath($ExtraInfo);
+        $ExtraPath = $ExtraInfo."/debug_line";
+    }
+    
+    if($ExtraPath)
+    {
+        system($EU_READELF." $AddOpt --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
         open(SRC, $ExtraPath);
     }
     else {
-        open(SRC, "$Readelf $AddOpt --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" |");
+        open(SRC, $EU_READELF." $AddOpt --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" |");
     }
     
     my $Offset = undef;
+    my $DirTable_Def = undef;
+    my %DirTable = ();
     
     while(<SRC>)
     {
-        if(/Table at offset (\w+)/)
+        if(defined $AddDirs)
         {
+            if(/Directory table/i)
+            {
+                $DirTable_Def = 1;
+                %DirTable = ();
+                next;
+            }
+            elsif(/File name table/i)
+            {
+                $DirTable_Def = undef;
+                next;
+            }
+            
+            if(defined $DirTable_Def)
+            {
+                if(/\A\s*(.+?)\Z/) {
+                    $DirTable{keys(%DirTable)+1} = $1;
+                }
+            }
+        }
+        
+        if(/Table at offset (\w+)/i) {
             $Offset = $1;
         }
         elsif(defined $Offset
-        and /(\d+)\s+\d+\s+\d+\s+\d+\s+([^ ]+)/)
+        and /(\d+)\s+(\d+)\s+\d+\s+\d+\s+([^ ]+)/)
         {
-            my ($Num, $File) = ($1, $2);
+            my ($Num, $Dir, $File) = ($1, $2, $3);
             chomp($File);
+            
+            if(defined $AddDirs)
+            {
+                if(my $DName = $DirTable{$Dir})
+                {
+                    $File = $DName."/".$File;
+                }
+            }
             
             $SourceFile{$Offset}{$Num} = $File;
         }
@@ -827,18 +903,17 @@ sub read_DWARF_Info($)
     # debug_loc
     if($ExtraInfo)
     {
-        $ExtraPath = $ExtraInfo."/".$Name;
-        mkpath($ExtraPath);
-        $ExtraPath .= "/debug_loc";
+        mkpath($ExtraInfo);
+        $ExtraPath = $ExtraInfo."/debug_loc";
     }
     
     if($ExtraPath)
     {
-        system("$Readelf $AddOpt --debug-dump=loc \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        system($EU_READELF." $AddOpt --debug-dump=loc \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
         open(LOC, $ExtraPath);
     }
     else {
-        open(LOC, "$Readelf $AddOpt --debug-dump=loc \"$Path\" 2>\"$TMP_DIR/error\" |");
+        open(LOC, $EU_READELF." $AddOpt --debug-dump=loc \"$Path\" 2>\"$TMP_DIR/error\" |");
     }
     
     while(<LOC>)
@@ -846,15 +921,17 @@ sub read_DWARF_Info($)
         if(/\[\s*(\w+)\].*\[\s*\w+\]\s*(.+)\Z/) {
             $DebugLoc{$1} = $2;
         }
+        elsif(/\A \[\s*(\w+)\]/) {
+            $DebugLoc{$1} = "";
+        }
     }
     close(LOC);
     
     # dwarf
     if($ExtraInfo)
     {
-        $ExtraPath = $ExtraInfo."/".$Name;
-        mkpath($ExtraPath);
-        $ExtraPath .= "/debug_info";
+        mkpath($ExtraInfo);
+        $ExtraPath = $ExtraInfo."/debug_info";
     }
     
     my $INFO_fh;
@@ -865,11 +942,11 @@ sub read_DWARF_Info($)
     }
     if($ExtraPath)
     {
-        system("$Readelf $AddOpt --debug-dump=info \"$Name\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        system($EU_READELF." $AddOpt --debug-dump=info \"$Name\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
         open($INFO_fh, $ExtraPath);
     }
     else {
-        open($INFO_fh, "$Readelf $AddOpt --debug-dump=info \"$Name\" 2>\"$TMP_DIR/error\" |");
+        open($INFO_fh, $EU_READELF." $AddOpt --debug-dump=info \"$Name\" 2>\"$TMP_DIR/error\" |");
     }
     chdir($ORIG_DIR);
     
@@ -879,7 +956,11 @@ sub read_DWARF_Info($)
     
     if(my $Err = readFile("$TMP_DIR/error"))
     { # eu-readelf: cannot get next DIE: invalid DWARF
-        if($Err=~/invalid DWARF/i) {
+        if($Err=~/invalid DWARF/i)
+        {
+            if($Loud) {
+                printMsg("ERROR", $Err);
+            }
             exitStatus("Invalid_DWARF", "invalid DWARF info");
         }
     }
@@ -996,7 +1077,6 @@ sub read_DWARF_Dump($$)
         }
         if($ID and $Line=~/\A\s*(\w+)\s*(.+?)\s*\Z/)
         {
-            
             if(defined $Skip_Block) {
                 next;
             }
@@ -1084,12 +1164,16 @@ sub read_DWARF_Dump($$)
             {
                 if($Val=~/\)\s*\Z/)
                 { # value on the next line
+                    my $NL = "";
+                    
                     if($Import) {
-                        $Val .= $ImportedUnit{$Import}{$Import_Num}
+                        $NL = $ImportedUnit{$Import}{$Import_Num}
                     }
                     else {
-                        $Val .= <$FH>;
+                        $NL = <$FH>;
                     }
+                    
+                    $Val .= $NL;
                 }
                 
                 if($Val=~/\A\(\w+\)\s*(-?)(\w+)\Z/)
@@ -1127,10 +1211,8 @@ sub read_DWARF_Dump($$)
             {
                 $Val=~s/\A\(.+?\)\s*//;
                 $Val=~s/\s*\(.+?\)\Z//;
-                if($Val eq "public")
-                { # public by default
-                    next;
-                }
+                
+                # NOTE: members: private by default
             }
             else
             {
@@ -1170,8 +1252,14 @@ sub read_DWARF_Dump($$)
                     $CUnit = $Val;
                 }
                 
-                if(not defined $CUnit_F) {
-                    $CUnit_F = $ID;
+                if($Attr eq "language")
+                {
+                    if(not defined $CUnit_F)
+                    {
+                        if(index($Val, "Assembler")==-1) {
+                            $CUnit_F = $ID;
+                        }
+                    }
                 }
             }
             
@@ -1453,13 +1541,15 @@ sub read_DWARF_Dump($$)
                     $SYS_COMP = $Compiler;
                 }
             }
-            if(my $Lang = $DWARF_Info{$CUnit_F}{"language"})
+            
+            if($LIB_LANG!~/\AC/ and my $Lang = $DWARF_Info{$CUnit_F}{"language"})
             {
                 $Lang=~s/\s*\(.+?\)\Z//;
+                
                 if($Lang=~/C\d/i) {
                     $LIB_LANG = "C";
                 }
-                elsif($Lang=~/C\+\+/i) {
+                elsif($Lang=~/C\+\+|C_plus_plus/i) {
                     $LIB_LANG = "C++";
                 }
                 else {
@@ -1580,9 +1670,10 @@ sub read_Vtables($)
     my $Name = get_filename($Path);
     $Path = abs_path($Path);
     
-    
     if(index($LIB_LANG, "C++")!=-1)
     {
+        printMsg("INFO", "Reading v-tables");
+        
         if(check_Cmd($VTABLE_DUMPER))
         {
             if(my $Version = `$VTABLE_DUMPER -dumpversion`)
@@ -1604,12 +1695,11 @@ sub read_Vtables($)
         
         if($ExtraInfo)
         {
-            $ExtraPath = $ExtraInfo."/".$Name;
-            mkpath($ExtraPath);
-            $ExtraPath .= "/v-tables";
+            mkpath($ExtraInfo);
+            $ExtraPath = $ExtraInfo."/v-tables";
         }
         
-        system("$VTABLE_DUMPER \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        system("$VTABLE_DUMPER -mangled -demangled \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
         
         my $Content = readFile($ExtraPath);
         foreach my $ClassInfo (split(/\n\n\n/, $Content))
@@ -1618,6 +1708,7 @@ sub read_Vtables($)
             {
                 my ($CName, $VTable) = ($1, $2);
                 my @Entries = split(/\n/, $VTable);
+                
                 foreach (1 .. $#Entries)
                 {
                     my $Entry = $Entries[$_];
@@ -1801,10 +1892,17 @@ sub read_ABI()
         }
         elsif($Kind eq "inheritance")
         {
-            my %In = (
-                "id" => $DWARF_Info{$ID}{"type"},
-                "access" => $DWARF_Info{$ID}{"accessibility"}
-            );
+            my %In = ();
+            $In{"id"} = $DWARF_Info{$ID}{"type"};
+            
+            if(my $Access = $DWARF_Info{$ID}{"accessibility"})
+            {
+                if($Access ne "public")
+                { # default inheritance access in ABI dump is "public"
+                    $In{"access"} = $Access;
+                }
+            }
+            
             if(defined $DWARF_Info{$ID}{"virtuality"}) {
                 $In{"virtual"} = 1;
             }
@@ -2540,8 +2638,23 @@ sub getTypeInfo($)
             else
             {
                 $TInfo{"Memb"}{$Pos}{"type"} = $MInfo{"type"};
-                if(my $Access = $MInfo{"accessibility"}) {
-                    $TInfo{"Memb"}{$Pos}{"access"} = $Access;
+                if(my $Access = $MInfo{"accessibility"})
+                {
+                    if($Access ne "public")
+                    { # NOTE: default access of members in the ABI dump is "public"
+                        $TInfo{"Memb"}{$Pos}{"access"} = $Access;
+                    }
+                }
+                else
+                { 
+                    if($DWARF_Info{$ID}{"Kind"} eq "class_type")
+                    { # NOTE: default access of class members in the debug info is "private"
+                        $TInfo{"Memb"}{$Pos}{"access"} = "private";
+                    }
+                    else
+                    {
+                        # NOTE: default access of struct members in the debug info is "public"
+                    }
                 }
                 if($TInfo{"Type"} eq "Union") {
                     $TInfo{"Memb"}{$Pos}{"offset"} = "0";
@@ -2557,8 +2670,45 @@ sub getTypeInfo($)
         }
     }
     
-    if(my $Access = $DWARF_Info{$ID}{"accessibility"}) {
-        $TInfo{ucfirst($Access)} = 1;
+    my $NS = $NameSpace{$ID};
+    if(not $NS)
+    {
+        if(my $Sp = $DWARF_Info{$ID}{"specification"}) {
+            $NS = $NameSpace{$Sp};
+        }
+    }
+    
+    if($NS and $DWARF_Info{$NS}{"Kind"}=~/\A(class_type|structure_type)\Z/)
+    { # member class
+        if(my $Access = $DWARF_Info{$ID}{"accessibility"})
+        {
+            if($Access ne "public")
+            { # NOTE: default access of member classes in the ABI dump is "public"
+                $TInfo{ucfirst($Access)} = 1;
+            }
+        }
+        else
+        {
+            if($DWARF_Info{$NS}{"Kind"} eq "class_type")
+            {
+                # NOTE: default access of member classes in the debug info is "private"
+                $TInfo{"Private"} = 1;
+            }
+            else
+            {
+                # NOTE: default access to struct member classes in the debug info is "public"
+            }
+        }
+    }
+    else
+    {
+        if(my $Access = $DWARF_Info{$ID}{"accessibility"})
+        {
+            if($Access ne "public")
+            { # NOTE: default access of classes in the ABI dump is "public"
+                $TInfo{ucfirst($Access)} = 1;
+            }
+        }
     }
     
     if(my $Size = $DWARF_Info{$ID}{"byte_size"}) {
@@ -2570,14 +2720,6 @@ sub getTypeInfo($)
     if(not $DWARF_Info{$ID}{"name"}
     and my $Spec = $DWARF_Info{$ID}{"specification"}) {
         $DWARF_Info{$ID}{"name"} = $DWARF_Info{$Spec}{"name"};
-    }
-    
-    my $NS = $NameSpace{$ID};
-    if(not $NS)
-    {
-        if(my $Sp = $DWARF_Info{$ID}{"specification"}) {
-            $NS = $NameSpace{$Sp};
-        }
     }
     
     if($NS)
@@ -2616,7 +2758,8 @@ sub getTypeInfo($)
         
         if($TInfo{"Type"}=~/\A(Struct|Class)\Z/)
         {
-            if(defined $VirtualTable{$TInfo{"Name"}}) {
+            if(defined $VirtualTable{$TInfo{"Name"}})
+            {
                 %{$TInfo{"VTable"}} = %{$VirtualTable{$TInfo{"Name"}}};
             }
         }
@@ -2714,6 +2857,12 @@ sub getTypeInfo($)
         }
         
         $TInfo{"Size"} = $SYS_WORD;
+    }
+    elsif($TInfo{"Type"} eq "String")
+    {
+        $TInfo{"Type"} = "Pointer";
+        $TInfo{"Name"} = "char*";
+        $TInfo{"BaseType"} = $TName_Tid{"Intrinsic"}{"char"};
     }
     
     foreach my $Pos (sort {int($a) <=> int($b)} keys(%{$Inheritance{$ID}}))
@@ -2940,7 +3089,7 @@ sub setSource($$)
                 $R->{"Line"} = $Line;
             }
         }
-        elsif($Name ne "<built-in>")
+        elsif(index($Name, "<built-in>")==-1)
         { # source
             $R->{"Source"} = $Name;
             if(defined $Line) {
@@ -2954,7 +3103,7 @@ sub skipSymbol($)
 {
     if($SkipCxx and not $STDCXX_TARGET)
     {
-        if($_[0]=~/\A(_ZS|_ZNS|_ZNKS|_ZN9__gnu_cxx|_ZNK9__gnu_cxx|_ZTIS|_ZTSS)/)
+        if($_[0]=~/\A(_ZS|_ZNS|_ZNKS|_ZN9__gnu_cxx|_ZNK9__gnu_cxx|_ZTIS|_ZTSS|_Zd|_Zn)/)
         { # stdc++ symbols
             return 1;
         }
@@ -3132,8 +3281,17 @@ sub getSymbolInfo($)
     
     if(not $MnglName)
     {
-        if(my $Sp = $SpecElem{$ID}) {
+        if(my $Sp = $SpecElem{$ID})
+        {
             $MnglName = get_Mangled($Sp);
+            
+            if(not $MnglName)
+            {
+                if(my $Orig = $OrigElem{$Sp})
+                {
+                    $MnglName = get_Mangled($Orig);
+                }
+            }
         }
     }
     
@@ -3179,14 +3337,23 @@ sub getSymbolInfo($)
                 setSource($SymbolInfo{$OLD_ID}, $ID);
             }
             
-            if(defined $Checked_Spec{$MnglName}
-            or (not $DWARF_Info{$ID}{"specification"} and not $DWARF_Info{$ID}{"low_pc"}))
+            if(not defined $SymbolInfo{$OLD_ID}{"ShortName"}
+            and $ShortName) {
+                $SymbolInfo{$OLD_ID}{"ShortName"} = $ShortName;
+            }
+            
+            if(defined $DWARF_Info{$OLD_ID}{"low_pc"}
+            or not defined $DWARF_Info{$ID}{"low_pc"})
             {
-                if(not defined $SpecElem{$ID}
-                and not defined $OrigElem{$ID}) {
-                    delete($DWARF_Info{$ID});
+                if(defined $Checked_Spec{$MnglName}
+                or not $DWARF_Info{$ID}{"specification"})
+                {
+                    if(not defined $SpecElem{$ID}
+                    and not defined $OrigElem{$ID}) {
+                        delete($DWARF_Info{$ID});
+                    }
+                    return;
                 }
-                return;
             }
         }
     }
@@ -3198,21 +3365,32 @@ sub getSymbolInfo($)
     }
     $SInfo{"MnglName"} = $MnglName;
     
-    if($MnglName eq $ShortName)
+    if($ShortName)
     {
-        delete($SInfo{"MnglName"});
-        $MnglName = $ShortName;
-    }
-    elsif(index($MnglName, "_Z")!=0)
-    {
-        if($SInfo{"ShortName"})
+        if($MnglName eq $ShortName)
         {
-            $SInfo{"Alias"} = $SInfo{"ShortName"};
-            $SInfo{"ShortName"} = $SInfo{"MnglName"};
+            delete($SInfo{"MnglName"});
+            $MnglName = $ShortName;
         }
-        
-        delete($SInfo{"MnglName"});
-        $MnglName = $ShortName;
+        elsif(index($MnglName, "_Z")!=0)
+        {
+            if($SInfo{"ShortName"})
+            {
+                $SInfo{"Alias"} = $SInfo{"ShortName"};
+                $SInfo{"ShortName"} = $SInfo{"MnglName"};
+            }
+            
+            delete($SInfo{"MnglName"});
+            $MnglName = $ShortName;
+        }
+    }
+    else
+    {
+        if(index($MnglName, "_Z")!=0)
+        {
+            $SInfo{"ShortName"} = $SInfo{"MnglName"};
+            delete($SInfo{"MnglName"});
+        }
     }
     
     if(isExternal($ID)) {
@@ -3291,8 +3469,12 @@ sub getSymbolInfo($)
                     }
                 }
                 
-                if(my $Access = $DWARF_Info{$Spec}{"accessibility"}) {
-                    $SInfo{ucfirst($Access)} = 1;
+                if(my $Access = $DWARF_Info{$Spec}{"accessibility"})
+                {
+                    if($Access ne "public")
+                    { # default access of methods in the ABI dump is "public"
+                        $SInfo{ucfirst($Access)} = 1;
+                    }
                 }
                 
                 # clean origin
@@ -3351,7 +3533,10 @@ sub getSymbolInfo($)
     
     if(my $Access = $DWARF_Info{$ID}{"accessibility"})
     {
-        $SInfo{ucfirst($Access)} = 1;
+        if($Access ne "public")
+        { # default access of methods in the ABI dump is "public"
+            $SInfo{ucfirst($Access)} = 1;
+        }
     }
     
     if(my $Class = $DWARF_Info{$ID}{"containing_type"})
@@ -3429,6 +3614,16 @@ sub getSymbolInfo($)
     
     setSource(\%SInfo, $ID);
     
+    if(not $SInfo{"Header"})
+    {
+        if(defined $SInfo{"Class"})
+        { # detect missed header by class
+            if(defined $TypeInfo{$SInfo{"Class"}}{"Header"}) {
+                $SInfo{"Header"} = $TypeInfo{$SInfo{"Class"}}{"Header"};
+            }
+        }
+    }
+    
     my $PPos = 0;
     
     foreach my $Pos (sort {int($a) <=> int($b)} keys(%{$FuncParam{$ID}}))
@@ -3461,6 +3656,14 @@ sub getSymbolInfo($)
                     $Offset = $1;
                 }
             }
+            elsif(not defined $DebugLoc{$LL})
+            { # invalid debug_loc
+                if(not $InvalidDebugLoc)
+                {
+                    printMsg("ERROR", "invalid debug_loc section of object, please fix your elf utils");
+                    $InvalidDebugLoc = 1;
+                }
+            }
         }
         
         if(my $Orig = $DWARF_Info{$ParamId}{"abstract_origin"}) {
@@ -3473,6 +3676,17 @@ sub getSymbolInfo($)
             $SInfo{"Param"}{$Pos}{"offset"} = $Offset;
         }
         
+        if($TypeInfo{$PInfo{"type"}}{"Type"} eq "Const")
+        {
+            if(my $BTid = $TypeInfo{$PInfo{"type"}}{"BaseType"})
+            {
+                if($TypeInfo{$BTid}{"Type"} eq "Ref")
+                { # const&const -> const&
+                    $PInfo{"type"} = $BTid;
+                }
+            }
+        }
+        
         $SInfo{"Param"}{$Pos}{"type"} = $PInfo{"type"};
         
         if(defined $PInfo{"name"}) {
@@ -3481,8 +3695,9 @@ sub getSymbolInfo($)
         elsif($TypeInfo{$PInfo{"type"}}{"Name"} ne "...") {
             $SInfo{"Param"}{$Pos}{"name"} = "p".($PPos+1);
         }
+        
         if(defined $Reg)
-        { # FIXME: 0+8, 1+16, etc. (for partially distributed parameters)
+        {
             $SInfo{"Reg"}{$Pos} = $Reg;
         }
         
@@ -3520,8 +3735,28 @@ sub getSymbolInfo($)
         $Checked_Spec{$MnglName} = 1;
     }
     
-    foreach my $Attr (keys(%SInfo)) {
-        $SymbolInfo{$ID}{$Attr} = $SInfo{$Attr};
+    foreach my $Attr (keys(%SInfo))
+    {
+        if(ref($SInfo{$Attr}) eq "HASH")
+        {
+            foreach my $K1 (keys(%{$SInfo{$Attr}}))
+            {
+                if(ref($SInfo{$Attr}{$K1}) eq "HASH")
+                {
+                    foreach my $K2 (keys(%{$SInfo{$Attr}{$K1}}))
+                    {
+                        $SymbolInfo{$ID}{$Attr}{$K1}{$K2} = $SInfo{$Attr}{$K1}{$K2};
+                    }
+                }
+                else {
+                    $SymbolInfo{$ID}{$Attr}{$K1} = $SInfo{$Attr}{$K1};
+                }
+            }
+        }
+        else
+        {
+            $SymbolInfo{$ID}{$Attr} = $SInfo{$Attr};
+        }
     }
     
     if($ID>$GLOBAL_ID) {
@@ -4341,19 +4576,18 @@ sub scenario()
     }
     else
     {
-        my $Readelf = "eu-readelf";
-        if(not check_Cmd($Readelf)) {
-            exitStatus("Not_Found", "can't find \"$Readelf\" command");
+        if(not check_Cmd($EU_READELF)) {
+            exitStatus("Not_Found", "can't find \"$EU_READELF\" command");
         }
         foreach my $Obj (@ARGV)
         {
-            my $Sect = `$Readelf -S \"$Obj\" 2>\"$TMP_DIR/error\"`;
+            my $Sect = `$EU_READELF -S \"$Obj\" 2>\"$TMP_DIR/error\"`;
     
             if($Sect=~/\.debug_info/)
             {
                 if($Sect=~/\.gnu_debugaltlink/)
                 {
-                    my $Str = `$Readelf --strings=.gnu_debugaltlink \"$Obj\" 2>\"$TMP_DIR/error\"`;
+                    my $Str = `$EU_READELF --strings=.gnu_debugaltlink \"$Obj\" 2>\"$TMP_DIR/error\"`;
                     
                     if($Str=~/0\]\s*(.+)/)
                     {

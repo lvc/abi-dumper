@@ -3,7 +3,7 @@
 # Makefile for ABI Dumper
 # Install/remove the tool for GNU/Linux
 #
-# Copyright (C) 2012-2015 Andrey Ponomarenko's ABI Laboratory
+# Copyright (C) 2013-2015 Andrey Ponomarenko's ABI Laboratory
 #
 # Written by Andrey Ponomarenko
 #
@@ -40,9 +40,8 @@ DESCRIPTION:
   Install $TOOL_SNAME command and private modules.
 
 USAGE:
-  sudo perl $0 -install --prefix=/usr
-  sudo perl $0 -update --prefix=/usr
-  sudo perl $0 -remove --prefix=/usr
+  sudo perl $0 -install -prefix=/usr
+  sudo perl $0 -remove -prefix=/usr
 
 OPTIONS:
   -h|-help
@@ -53,9 +52,6 @@ OPTIONS:
 
   -install
       Command to install the tool.
-
-  -update
-      Command to update existing installation.
 
   -remove
       Command to remove the tool.
@@ -68,19 +64,19 @@ EXTRA OPTIONS:
       supported.
 \n";
 
-if(not @ARGV) {
+if(not @ARGV)
+{
     print $HELP_MSG;
     exit(0);
 }
 
-my ($PREFIX, $DESTDIR, $Help, $Install, $Update, $Remove);
+my ($PREFIX, $DESTDIR, $Help, $Install, $Remove);
 
 GetOptions(
     "h|help!" => \$Help,
     "prefix=s" => \$PREFIX,
     "destdir=s" => \$DESTDIR,
     "install!" => \$Install,
-    "update!" => \$Update,
     "remove!" => \$Remove
 ) or exit(1);
 
@@ -91,17 +87,23 @@ sub scenario()
         print $HELP_MSG;
         exit(0);
     }
-    if(not $Install and not $Update and not $Remove)
+    if(not $Install and not $Remove)
     {
-        print STDERR "ERROR: command is not selected (-install, -update or -remove)\n";
+        print STDERR "ERROR: command is not selected (-install or -remove)\n";
         exit(1);
     }
+    
+    if($Install)
+    { # remove old version first
+        $Remove = 1;
+    }
+    
     if($PREFIX ne "/") {
         $PREFIX=~s/[\/]+\Z//g;
     }
     if(not $PREFIX)
     { # default prefix
-        $PREFIX = "/usr/local";
+        $PREFIX = "/usr";
     }
     if(my $Var = $ENV{"DESTDIR"})
     {
@@ -150,37 +152,38 @@ sub scenario()
     my $EXE_PATH = "$PREFIX/bin";
     my $MODULES_PATH = "$PREFIX/share/$TOOL_SNAME";
     my $REL_PATH = "../share/$TOOL_SNAME";
+    my $TOOL_PATH = "$EXE_PATH/$TOOL_SNAME";
     
     if(not -w $PREFIX)
     {
         print STDERR "ERROR: you should be root\n";
         exit(1);
     }
-    if($Remove or $Update)
+    if($Remove)
     {
         if(-e $EXE_PATH."/".$TOOL_SNAME)
         { # remove executable
-            print "-- Removing $EXE_PATH/$TOOL_SNAME\n";
+            print "-- Removing $TOOL_PATH\n";
             unlink($EXE_PATH."/".$TOOL_SNAME);
         }
-        
-        if(-d $MODULES_PATH)
-        { # remove modules
-            print "-- Removing $MODULES_PATH\n";
-            rmtree($MODULES_PATH);
+        elsif(not $Install) {
+            print "The tool is not installed\n";
         }
-    }
-    if($Install or $Update)
-    {
-        if(-e $EXE_PATH."/".$TOOL_SNAME or -e $MODULES_PATH)
-        { # check installed
-            if(not $Remove)
-            {
-                print STDERR "ERROR: you should remove old version first (`sudo perl $0 -remove --prefix=$PREFIX`)\n";
-                exit(1);
+        
+        if(-d $ARCHIVE_DIR."/modules")
+        {
+            if(-d $MODULES_PATH)
+            { # remove modules
+                print "-- Removing $MODULES_PATH\n";
+                rmtree($MODULES_PATH);
+            }
+            elsif(not $Install) {
+                print "The modules of the tool are not installed\n";
             }
         }
-        
+    }
+    if($Install)
+    {
         # configure
         my $Content = readFile($ARCHIVE_DIR."/".$TOOL_SNAME.".pl");
         if($DESTDIR) { # relative path
@@ -191,7 +194,7 @@ sub scenario()
         }
         
         # copy executable
-        print "-- Installing $EXE_PATH/$TOOL_SNAME\n";
+        print "-- Installing $TOOL_PATH\n";
         mkpath($EXE_PATH);
         writeFile($EXE_PATH."/".$TOOL_SNAME, $Content);
         chmod(0775, $EXE_PATH."/".$TOOL_SNAME);
@@ -199,14 +202,9 @@ sub scenario()
         # copy modules
         if(-d $ARCHIVE_DIR."/modules")
         {
-                print "-- Installing $MODULES_PATH\n";
-                mkpath($MODULES_PATH);
-                copyDir($ARCHIVE_DIR."/modules", $MODULES_PATH);
-                my $TOOLS_PATH = $MODULES_PATH."/modules/Internals/Tools";
-                my @Tools = listDir($TOOLS_PATH);
-                foreach my $Tool (@Tools) {
-                    chmod(0775, $TOOLS_PATH."/".$Tool);
-                }
+            print "-- Installing $MODULES_PATH\n";
+            mkpath($MODULES_PATH);
+            copyDir($ARCHIVE_DIR."/modules", $MODULES_PATH);
         }
         
         # check PATH
@@ -215,16 +213,6 @@ sub scenario()
         }
     }
     exit(0);
-}
-
-sub listDir($)
-{
-    my $Path = $_[0];
-    return () if(not $Path or not -d $Path);
-    opendir(my $DH, $Path);
-    return () if(not $DH);
-    my @Contents = grep { $_ ne "." && $_ ne ".." } readdir($DH);
-    return @Contents;
 }
 
 sub copyDir($$)
