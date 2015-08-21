@@ -51,7 +51,9 @@ my $TMP_DIR = tempdir(CLEANUP=>1);
 my $VTABLE_DUMPER = "vtable-dumper";
 my $VTABLE_DUMPER_VERSION = "1.0";
 
+my $LOCALE = "LANG=en_US.UTF-8";
 my $EU_READELF = "eu-readelf";
+my $EU_READELF_L = $LOCALE." ".$EU_READELF;
 
 my ($Help, $ShowVersion, $DumpVersion, $OutputDump, $SortDump, $StdOut,
 $TargetVersion, $ExtraInfo, $FullDump, $AllTypes, $AllSymbols, $BinOnly,
@@ -285,7 +287,6 @@ my $SRC_EXT = "c|cpp|cxx|c\\+\\+";
 # Other
 my %NestedNameSpaces;
 my $TargetName;
-my %SysInfo;
 my %HeadersInfo;
 my %SourcesInfo;
 my %SymVer;
@@ -473,7 +474,7 @@ sub read_Symbols($)
         exitStatus("Not_Found", "can't find \"eu-readelf\"");
     }
     
-    my $Cmd = $EU_READELF." -S \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
+    my $Cmd = $EU_READELF_L." -S \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
     foreach (split(/\n/, `$Cmd`))
     {
         if(/\[\s*(\d+)\]\s+([\w\.]+)/)
@@ -484,7 +485,7 @@ sub read_Symbols($)
     
     if($Dynamic)
     { # dynamic library specifics
-        $Cmd = $EU_READELF." -d \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
+        $Cmd = $EU_READELF_L." -d \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
         foreach (split(/\n/, `$Cmd`))
         {
             if(/NEEDED.+\[([^\[\]]+)\]/)
@@ -503,7 +504,7 @@ sub read_Symbols($)
         $ExtraPath = $ExtraInfo."/elf-info";
     }
     
-    $Cmd = $EU_READELF." -s \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
+    $Cmd = $EU_READELF_L." -s \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
     
     if($ExtraPath)
     { # debug mode
@@ -653,11 +654,11 @@ sub read_Alt_Info($)
     
     if($ExtraPath)
     {
-        system($EU_READELF." -N --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        system($EU_READELF_L." -N --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
         open(SRC, $ExtraPath);
     }
     else {
-        open(SRC, $EU_READELF." -N --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" |");
+        open(SRC, $EU_READELF_L." -N --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" |");
     }
     
     my $DirTable_Def = undef;
@@ -714,11 +715,11 @@ sub read_Alt_Info($)
     
     if($ExtraPath)
     {
-        system($EU_READELF." -N --debug-dump=info \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        system($EU_READELF_L." -N --debug-dump=info \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
         open(INFO, $ExtraPath);
     }
     else {
-        open(INFO, $EU_READELF." -N --debug-dump=info \"$Path\" 2>\"$TMP_DIR/error\" |");
+        open(INFO, $EU_READELF_L." -N --debug-dump=info \"$Path\" 2>\"$TMP_DIR/error\" |");
     }
     
     my $ID = undef;
@@ -771,7 +772,7 @@ sub read_DWARF_Info($)
         $AddOpt .= " -N";
     }
     
-    my $Sect = `$EU_READELF -S \"$Path\" 2>\"$TMP_DIR/error\"`;
+    my $Sect = `$EU_READELF_L -S \"$Path\" 2>\"$TMP_DIR/error\"`;
     
     if($Sect!~/\.debug_info/)
     { # No DWARF info
@@ -791,11 +792,11 @@ sub read_DWARF_Info($)
     
     if($ExtraPath)
     {
-        system($EU_READELF." -h \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        system($EU_READELF_L." -h \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
         open(HEADER, $ExtraPath);
     }
     else {
-        open(HEADER, $EU_READELF." -h \"$Path\" 2>\"$TMP_DIR/error\" |");
+        open(HEADER, $EU_READELF_L." -h \"$Path\" 2>\"$TMP_DIR/error\" |");
     }
     
     my %Header = ();
@@ -830,7 +831,7 @@ sub read_DWARF_Info($)
     
     if($ExtraPath)
     {
-        system($EU_READELF." -S \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        system($EU_READELF_L." -S \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
         open(HEADER, $ExtraPath);
     }
     
@@ -843,11 +844,11 @@ sub read_DWARF_Info($)
     
     if($ExtraPath)
     {
-        system($EU_READELF." $AddOpt --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        system($EU_READELF_L." $AddOpt --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
         open(SRC, $ExtraPath);
     }
     else {
-        open(SRC, $EU_READELF." $AddOpt --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" |");
+        open(SRC, $EU_READELF_L." $AddOpt --debug-dump=line \"$Path\" 2>\"$TMP_DIR/error\" |");
     }
     
     my $Offset = undef;
@@ -909,11 +910,11 @@ sub read_DWARF_Info($)
     
     if($ExtraPath)
     {
-        system($EU_READELF." $AddOpt --debug-dump=loc \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        system($EU_READELF_L." $AddOpt --debug-dump=loc \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
         open(LOC, $ExtraPath);
     }
     else {
-        open(LOC, $EU_READELF." $AddOpt --debug-dump=loc \"$Path\" 2>\"$TMP_DIR/error\" |");
+        open(LOC, $EU_READELF_L." $AddOpt --debug-dump=loc \"$Path\" 2>\"$TMP_DIR/error\" |");
     }
     
     while(<LOC>)
@@ -942,11 +943,11 @@ sub read_DWARF_Info($)
     }
     if($ExtraPath)
     {
-        system($EU_READELF." $AddOpt --debug-dump=info \"$Name\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        system($EU_READELF_L." $AddOpt --debug-dump=info \"$Name\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
         open($INFO_fh, $ExtraPath);
     }
     else {
-        open($INFO_fh, $EU_READELF." $AddOpt --debug-dump=info \"$Name\" 2>\"$TMP_DIR/error\" |");
+        open($INFO_fh, $EU_READELF_L." $AddOpt --debug-dump=info \"$Name\" 2>\"$TMP_DIR/error\" |");
     }
     chdir($ORIG_DIR);
     
@@ -1535,7 +1536,10 @@ sub read_DWARF_Dump($$)
                 if($Compiler=~/GNU\s+(C|C\+\+)\s+(.+)\Z/)
                 {
                     $SYS_GCCV = $2;
-                    $SYS_GCCV=~s/\d+\s+\(.+\).*//; # 4.6.1 20110627 (Mandriva)
+                    if($SYS_GCCV=~/\A(\d+\.\d+)(\.\d+|)/)
+                    { # 4.6.1 20110627 (Mandriva)
+                        $SYS_GCCV = $1.$2;
+                    }
                 }
                 else {
                     $SYS_COMP = $Compiler;
@@ -4169,6 +4173,14 @@ sub register_TypeUsage($)
                     $TypeInfo{$TypeId}{"Class"} = $CTid;
                 }
             }
+            if($TInfo{"Type"} eq "Enum")
+            {
+                if(my $BTid = getFirst($TInfo{"BaseType"}))
+                {
+                    register_TypeUsage($BTid);
+                    $TypeInfo{$TypeId}{"BaseType"} = $BTid;
+                }
+            }
             return 1;
         }
         elsif($TInfo{"Type"}=~/\A(Const|ConstVolatile|Volatile|Pointer|Ref|Restrict|Array|Typedef)\Z/)
@@ -4581,13 +4593,13 @@ sub scenario()
         }
         foreach my $Obj (@ARGV)
         {
-            my $Sect = `$EU_READELF -S \"$Obj\" 2>\"$TMP_DIR/error\"`;
+            my $Sect = `$EU_READELF_L -S \"$Obj\" 2>\"$TMP_DIR/error\"`;
     
             if($Sect=~/\.debug_info/)
             {
                 if($Sect=~/\.gnu_debugaltlink/)
                 {
-                    my $Str = `$EU_READELF --strings=.gnu_debugaltlink \"$Obj\" 2>\"$TMP_DIR/error\"`;
+                    my $Str = `$EU_READELF_L --strings=.gnu_debugaltlink \"$Obj\" 2>\"$TMP_DIR/error\"`;
                     
                     if($Str=~/0\]\s*(.+)/)
                     {

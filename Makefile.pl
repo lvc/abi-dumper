@@ -197,7 +197,7 @@ sub scenario()
         print "-- Installing $TOOL_PATH\n";
         mkpath($EXE_PATH);
         writeFile($EXE_PATH."/".$TOOL_SNAME, $Content);
-        chmod(0775, $EXE_PATH."/".$TOOL_SNAME);
+        chmod(0755, $EXE_PATH."/".$TOOL_SNAME);
         
         # copy modules
         if(-d $ARCHIVE_DIR."/modules")
