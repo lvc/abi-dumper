@@ -2991,6 +2991,19 @@ sub getTypeInfo($)
                 $TInfo{"Size"} = $SYS_WORD;
             }
         }
+        elsif($TInfo{"Type"} eq "Pointer")
+        {
+            if(my $BType = $TInfo{"BaseType"})
+            {
+                if($TypeInfo{$BType}{"Type"}=~/MethodPtr|FuncPtr/)
+                { # void(GTestSuite::**)()
+                  # int(**)(...)
+                    if($TInfo{"Name"}=~s/\*\Z//) {
+                        $TInfo{"Name"}=~s/\*(\))/\*\*$1/;
+                    }
+                }
+            }
+        }
     }
     
     if(my $Bid = $TInfo{"BaseType"})
