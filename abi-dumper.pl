@@ -51,16 +51,16 @@ my $TMP_DIR = tempdir(CLEANUP=>1);
 my $VTABLE_DUMPER = "vtable-dumper";
 my $VTABLE_DUMPER_VERSION = "1.0";
 
-my $LOCALE = "LANG=en_US.UTF-8";
+my $LOCALE = "LANG=C.UTF-8";
 my $EU_READELF = "eu-readelf";
 my $EU_READELF_L = $LOCALE." ".$EU_READELF;
 
 my ($Help, $ShowVersion, $DumpVersion, $OutputDump, $SortDump, $StdOut,
 $TargetVersion, $ExtraInfo, $FullDump, $AllTypes, $AllSymbols, $BinOnly,
 $SkipCxx, $Loud, $AddrToName, $DumpStatic, $Compare, $AltDebugInfo,
-$OptMem, $AddDirs);
+$OptMem, $AddDirs, $HeaderSymbolsPath);
 
-my $CmdName = get_filename($0);
+my $CmdName = getFilename($0);
 
 my %ERROR_CODE = (
     "Success"=>0,
@@ -116,7 +116,8 @@ GetOptions("h|help!" => \$Help,
   "mem!" =>\$OptMem,
   "dir!" =>\$AddDirs,
 # internal options
-  "addr2name!" => \$AddrToName
+  "addr2name!" => \$AddrToName,
+  "header-symbols=s" =>\$HeaderSymbolsPath
 ) or ERR_MESSAGE();
 
 sub ERR_MESSAGE()
@@ -268,6 +269,7 @@ my %TypeType = (
     "const_type"=>"Const",
     "pointer_type"=>"Pointer",
     "reference_type"=>"Ref",
+    "rvalue_reference_type"=>"RvalueRef",
     "volatile_type"=>"Volatile",
     "typedef"=>"Typedef",
     "ptr_to_member_type"=>"FieldPtr",
@@ -277,6 +279,7 @@ my %TypeType = (
 my %Qual = (
     "Pointer"=>"*",
     "Ref"=>"&",
+    "RvalueRef"=>"&&",
     "Volatile"=>"volatile",
     "Const"=>"const"
 );
@@ -313,6 +316,9 @@ my $LIB_LANG;
 
 # Errors
 my $InvalidDebugLoc;
+
+# Input
+my %SymbolToHeader;
 
 sub printMsg($$)
 {
@@ -359,7 +365,7 @@ sub writeFile($$)
 {
     my ($Path, $Content) = @_;
     return if(not $Path);
-    if(my $Dir = get_dirname($Path)) {
+    if(my $Dir = getDirname($Path)) {
         mkpath($Dir);
     }
     open(FILE, ">", $Path) || die ("can't open file \'$Path\': $!\n");
@@ -378,7 +384,7 @@ sub readFile($)
     return $Content;
 }
 
-sub get_filename($)
+sub getFilename($)
 { # much faster than basename() from File::Basename module
     if($_[0] and $_[0]=~/([^\/\\]+)[\/\\]*\Z/) {
         return $1;
@@ -386,7 +392,7 @@ sub get_filename($)
     return "";
 }
 
-sub get_dirname($)
+sub getDirname($)
 { # much faster than dirname() from File::Basename module
     if($_[0] and $_[0]=~/\A(.*?)[\/\\]+[^\/\\]*[\/\\]*\Z/) {
         return $1;
@@ -465,7 +471,7 @@ sub readline_ELF($)
 sub read_Symbols($)
 {
     my $Lib_Path = $_[0];
-    my $Lib_Name = get_filename($Lib_Path);
+    my $Lib_Name = getFilename($Lib_Path);
     
     my $Dynamic = ($Lib_Name=~/\.so(\.|\Z)/);
     my $Dbg = ($Lib_Name=~/\.debug\Z/);
@@ -634,7 +640,7 @@ sub read_Symbols($)
 sub read_Alt_Info($)
 {
     my $Path = $_[0];
-    my $Name = get_filename($Path);
+    my $Name = getFilename($Path);
     
     if(not check_Cmd($EU_READELF)) {
         exitStatus("Not_Found", "can't find \"$EU_READELF\" command");
@@ -759,8 +765,8 @@ sub read_DWARF_Info($)
 {
     my $Path = $_[0];
     
-    my $Dir = get_dirname($Path);
-    my $Name = get_filename($Path);
+    my $Dir = getDirname($Path);
+    my $Name = getFilename($Path);
     
     if(not check_Cmd($EU_READELF)) {
         exitStatus("Not_Found", "can't find \"$EU_READELF\" command");
@@ -1671,7 +1677,7 @@ sub read_Vtables($)
 {
     my $Path = $_[0];
     
-    my $Name = get_filename($Path);
+    my $Name = getFilename($Path);
     $Path = abs_path($Path);
     
     if(index($LIB_LANG, "C++")!=-1)
@@ -1765,7 +1771,7 @@ sub dump_ABI()
     }
     else
     {
-        mkpath(get_dirname($OutputDump));
+        mkpath(getDirname($OutputDump));
         
         open(DUMP, ">", $OutputDump) || die ("can't open file \'$OutputDump\': $!\n");
         print DUMP $ABI_DUMP;
@@ -1803,6 +1809,8 @@ sub read_ABI()
     if($AltDebugInfo) {
         @IDs = sort {$b>0 <=> $a>0} sort {abs(int($a)) <=> abs(int($b))} @IDs;
     }
+    
+    my $PPack = undef;
     
     foreach my $ID (@IDs)
     {
@@ -1917,7 +1925,12 @@ sub read_ABI()
         }
         elsif($Kind eq "formal_parameter")
         {
-            $FuncParam{$Scope}{keys(%{$FuncParam{$Scope}})} = $ID;
+            if(defined $PPack) {
+                $FuncParam{$PPack}{keys(%{$FuncParam{$PPack}})} = $ID;
+            }
+            else {
+                $FuncParam{$Scope}{keys(%{$FuncParam{$Scope}})} = $ID;
+            }
         }
         elsif($Kind eq "unspecified_parameters")
         {
@@ -1932,6 +1945,16 @@ sub read_ABI()
             
             # free memory
             delete($DWARF_Info{$ID});
+        }
+        elsif($Kind eq "GNU_formal_parameter_pack") {
+            $PPack = $Scope;
+        }
+        
+        if($Kind ne "GNU_formal_parameter_pack")
+        {
+            if($Kind ne "formal_parameter") {
+                $PPack = undef;
+            }
         }
     }
     
@@ -3628,6 +3651,13 @@ sub getSymbolInfo($)
         }
     }
     
+    if(not $SInfo{"Header"})
+    {
+        if(defined $SymbolToHeader{$MnglName}) {
+            $SInfo{"Header"} = $SymbolToHeader{$MnglName};
+        }
+    }
+    
     my $PPos = 0;
     
     foreach my $Pos (sort {int($a) <=> int($b)} keys(%{$FuncParam{$ID}}))
@@ -3798,7 +3828,7 @@ sub getFirst($)
         my $FTid = undef;
         if($F)
         {
-            foreach my $Type ("Class", "Const", "Ref", "Pointer")
+            foreach my $Type ("Class", "Const", "Ref", "RvalueRef", "Pointer")
             {
                 if($FTid = $TName_Tid{$Type}{$Name})
                 {
@@ -3837,7 +3867,7 @@ sub searchTypeID($)
     );
     
     foreach my $Type ("Class", "Struct", "Union", "Enum", "Typedef", "Const",
-    "Volatile", "Ref", "Pointer", "FuncPtr", "MethodPtr", "FieldPtr")
+    "Volatile", "Ref", "RvalueRef", "Pointer", "FuncPtr", "MethodPtr", "FieldPtr")
     {
         my $Tid = $TName_Tid{$Type}{$Name};
         
@@ -4183,7 +4213,7 @@ sub register_TypeUsage($)
             }
             return 1;
         }
-        elsif($TInfo{"Type"}=~/\A(Const|ConstVolatile|Volatile|Pointer|Ref|Restrict|Array|Typedef)\Z/)
+        elsif($TInfo{"Type"}=~/\A(Const|ConstVolatile|Volatile|Pointer|Ref|RvalueRef|Restrict|Array|Typedef)\Z/)
         {
             $UsedType{$TypeId} = 1;
             if(my $BTid = getFirst($TInfo{"BaseType"}))
@@ -4356,6 +4386,7 @@ sub init_Registers()
         %RegName = (
         # integer registers
         # 64 bits
+            "0"=>"rax",
             "1"=>"rdx",
             "2"=>"rcx",
             "3"=>"rbx",
@@ -4372,7 +4403,7 @@ sub init_Registers()
             "14"=>"r14",
             "15"=>"r15",
             "16"=>"rip",
-            "49"=>"rflags",
+            "49"=>"rFLAGS",
         # MMX registers
         # 64 bits
             "41"=>"mm0",
@@ -4603,7 +4634,7 @@ sub scenario()
                     
                     if($Str=~/0\]\s*(.+)/)
                     {
-                        my $AltObj_R = get_dirname($Obj)."/".$1;
+                        my $AltObj_R = getDirname($Obj)."/".$1;
                         
                         my $AltObj = $AltObj_R;
                         
@@ -4625,6 +4656,25 @@ sub scenario()
         }
     }
     
+    if(defined $HeaderSymbolsPath)
+    {
+        if(not -f $HeaderSymbolsPath)
+        {
+            exitStatus("Access_Error", "can't access \'$HeaderSymbolsPath\'");
+        }
+        
+        if(my $HeaderSymbols = eval(readFile($HeaderSymbolsPath)))
+        {
+            foreach my $P (sort keys(%{$HeaderSymbols}))
+            {
+                foreach my $S (sort keys(%{$HeaderSymbols->{$P}}))
+                {
+                    $SymbolToHeader{$S} = getFilename($P);
+                }
+            }
+        }
+    }
+    
     if($AltDebugInfo) {
         read_Alt_Info($AltDebugInfo);
     }
@@ -4639,7 +4689,7 @@ sub scenario()
     
     foreach my $Obj (@ARGV)
     {
-        $TargetName = get_filename(realpath($Obj));
+        $TargetName = getFilename(realpath($Obj));
         $TargetName=~s/\.debug\Z//; # nouveau.ko.debug
         
         if(index($TargetName, "libstdc++.so")==0) {
