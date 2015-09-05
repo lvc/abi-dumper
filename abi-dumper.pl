@@ -297,7 +297,6 @@ my %UsedType;
 
 # ELF
 my %Library_Symbol;
-my %Library_LocalSymbol;
 my %Library_UndefSymbol;
 my %Library_Needed;
 my %SymbolTable;
@@ -560,10 +559,7 @@ sub read_Symbols($)
                     next;
                 }
                 
-                if($Bind eq "LOCAL") {
-                    $Library_LocalSymbol{$TargetName}{$Symbol} = ($Type eq "OBJECT")?-$Size:1;
-                }
-                else {
+                if($Bind ne "LOCAL") {
                     $Library_Symbol{$TargetName}{$Symbol} = ($Type eq "OBJECT")?-$Size:1;
                 }
                 
@@ -1739,7 +1735,6 @@ sub dump_ABI()
         "TypeInfo" => \%TypeInfo,
         "SymbolInfo" => \%SymbolInfo,
         "Symbols" => \%Library_Symbol,
-        "LocalSymbols" => \%Library_LocalSymbol,
         "UndefinedSymbols" => \%Library_UndefSymbol,
         "Needed" => \%Library_Needed,
         "SymbolVersion" => \%SymVer,

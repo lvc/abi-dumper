@@ -40,15 +40,15 @@ DESCRIPTION:
   Install $TOOL_SNAME command and private modules.
 
 USAGE:
-  sudo perl $0 -install -prefix=/usr
-  sudo perl $0 -remove -prefix=/usr
+  sudo perl $0 -install -prefix /usr
+  sudo perl $0 -remove -prefix /usr
 
 OPTIONS:
   -h|-help
       Print this help.
 
   --prefix=PREFIX
-      Install files in PREFIX [/usr/local].
+      Install files in PREFIX [/usr].
 
   -install
       Command to install the tool.
