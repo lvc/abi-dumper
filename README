@@ -1,11 +1,13 @@
 NAME:
-  ABI Dumper - a tool to dump ABI of an ELF object containing DWARF debug info
+  ABI Dumper - a tool to dump ABI of an ELF object containing DWARF debug info.
   
   The tool is intended to be used with ABI Compliance Checker tool for tracking
   ABI changes of a C/C++ library or kernel module.
+  
+  The tool is developed by Andrey Ponomarenko: http://abi-laboratory.pro/
 
 INSTALL:
-  sudo perl Makefile.pl -install --prefix=/usr
+  sudo make install prefix=/usr
   
 REQUIRES:
   Perl 5 (5.8 or newer)

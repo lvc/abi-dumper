@@ -1086,6 +1086,11 @@ sub read_DWARF_Dump($$)
             
             my ($Attr, $Val) = ($1, $2);
             
+            if(index($Val, "flag_present")!=-1)
+            { # Fedora
+                $Val = "Yes";
+            }
+            
             if($Kind eq "member"
             or $Kind eq "formal_parameter")
             {
@@ -3511,6 +3516,10 @@ sub getSymbolInfo($)
                         $SInfo{ucfirst($Access)} = 1;
                     }
                 }
+                else
+                { # NOTE: default access of class methods in the debug info is "private"
+                    $SInfo{"Private"} = 1;
+                }
                 
                 # clean origin
                 delete($SymbolInfo{$Spec});
@@ -3571,6 +3580,17 @@ sub getSymbolInfo($)
         if($Access ne "public")
         { # default access of methods in the ABI dump is "public"
             $SInfo{ucfirst($Access)} = 1;
+        }
+    }
+    elsif(not $DWARF_Info{$ID}{"specification"}
+    and not $DWARF_Info{$ID}{"abstract_origin"})
+    {
+        if(my $NS = $NameSpace{$ID})
+        {
+            if(defined $TypeInfo{$NS})
+            { # NOTE: default access of class methods in the debug info is "private"
+                $SInfo{"Private"} = 1;
+            }
         }
     }
     
