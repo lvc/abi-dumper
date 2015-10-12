@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.99.10
+# ABI Dumper 0.99.11
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013-2015 Andrey Ponomarenko's ABI Laboratory
@@ -16,6 +16,10 @@
 #  Perl 5 (5.8 or newer)
 #  Elfutils (eu-readelf)
 #  Vtable-Dumper (1.1 or newer)
+#
+# SUGGESTS
+# ========
+#  Ctags (5.8 or newer)
 #
 # COMPATIBILITY
 # =============
@@ -43,7 +47,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.99.10";
+my $TOOL_VERSION = "0.99.11";
 my $ABI_DUMP_VERSION = "3.2";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -54,11 +58,13 @@ my $VTABLE_DUMPER_VERSION = "1.0";
 my $LOCALE = "LANG=C.UTF-8";
 my $EU_READELF = "eu-readelf";
 my $EU_READELF_L = $LOCALE." ".$EU_READELF;
+my $CTAGS = "ctags";
 
 my ($Help, $ShowVersion, $DumpVersion, $OutputDump, $SortDump, $StdOut,
 $TargetVersion, $ExtraInfo, $FullDump, $AllTypes, $AllSymbols, $BinOnly,
 $SkipCxx, $Loud, $AddrToName, $DumpStatic, $Compare, $AltDebugInfo,
-$AddDirs, $VTDumperPath, $HeaderSymbolsPath, $SymbolsListPath);
+$AddDirs, $VTDumperPath, $SymbolsListPath, $PublicHeadersPath,
+$IgnoreTagsPath);
 
 my $CmdName = getFilename($0);
 
@@ -103,7 +109,7 @@ GetOptions("h|help!" => \$Help,
   "sort!" => \$SortDump,
   "stdout!" => \$StdOut,
   "loud!" => \$Loud,
-  "lver|lv=s" => \$TargetVersion,
+  "vnum|lver|lv=s" => \$TargetVersion,
   "extra-info=s" => \$ExtraInfo,
   "bin-only!" => \$BinOnly,
   "all-types!" => \$AllTypes,
@@ -114,11 +120,12 @@ GetOptions("h|help!" => \$Help,
   "dump-static!" => \$DumpStatic,
   "compare!" => \$Compare,
   "alt=s" => \$AltDebugInfo,
-  "dir!" =>\$AddDirs,
-  "vt-dumper=s" =>\$VTDumperPath,
+  "dir!" => \$AddDirs,
+  "vt-dumper=s" => \$VTDumperPath,
+  "public-headers=s" => \$PublicHeadersPath,
+  "ignore-tags=s" => \$IgnoreTagsPath,
 # internal options
-  "addr2name!" => \$AddrToName,
-  "header-symbols=s" =>\$HeaderSymbolsPath
+  "addr2name!" => \$AddrToName
 ) or ERR_MESSAGE();
 
 sub ERR_MESSAGE()
@@ -173,7 +180,7 @@ GENERAL OPTIONS:
   -loud
       Print all warnings.
       
-  -lv|-lver NUM
+  -vnum NUM
       Set version of the library to NUM.
       
   -extra-info DIR
@@ -215,6 +222,15 @@ GENERAL OPTIONS:
   -vt-dumper PATH
       Path to the vtable-dumper executable if it is installed
       to non-default location (not in PATH).
+  
+  -public-headers PATH
+      Path to directory with public header files or to file with
+      the list of header files. This option allows to filter out
+      private symbols from the ABI dump.
+  
+  -ignore-tags PATH
+      Path to ignore.tags file to help ctags tool to read
+      symbols in header files.
 ";
 
 sub HELP_MESSAGE() {
@@ -330,12 +346,15 @@ my $SYS_WORD;
 my $SYS_GCCV;
 my $SYS_COMP;
 my $LIB_LANG;
+my $OBJ_LANG;
 
 # Errors
 my $InvalidDebugLoc;
 
-# Input
+# Public Headers
 my %SymbolToHeader;
+my %PublicHeader;
+my $PublicSymbols_Detected;
 
 # Filter
 my %SymbolsList;
@@ -349,7 +368,8 @@ sub printMsg($$)
     if($Type!~/_C\Z/) {
         $Msg .= "\n";
     }
-    if($Type eq "ERROR") {
+    if($Type eq "ERROR"
+    or $Type eq "WARNING") {
         print STDERR $Msg;
     }
     else {
@@ -594,6 +614,17 @@ sub read_Symbols($)
                 
                 $Symbol_Value{$Symbol} = $Value;
                 $Value_Symbol{$Value}{$Symbol} = 1;
+                
+                if(defined $PublicHeadersPath)
+                {
+                    if(not defined $OBJ_LANG)
+                    {
+                        if(index($Symbol, "_Z")==0)
+                        {
+                            $OBJ_LANG = "C++";
+                        }
+                    }
+                }
             }
             
             foreach ($SectionInfo{$Ndx}, "")
@@ -613,6 +644,10 @@ sub read_Symbols($)
         }
     }
     close(LIB);
+    
+    if(not defined $Library_Symbol{$TargetName}) {
+        return;
+    }
     
     my %Found = ();
     foreach my $Symbol (keys(%{$Library_Symbol{$TargetName}}))
@@ -658,6 +693,14 @@ sub read_Symbols($)
         {
             $SymVer{$1} = $Symbol;
             $Found{$Symbol} = 1;
+        }
+    }
+    
+    if(defined $PublicHeadersPath)
+    {
+        if(not defined $OBJ_LANG)
+        {
+            $OBJ_LANG = "C";
         }
     }
 }
@@ -807,6 +850,19 @@ sub read_DWARF_Info($)
     
     if($Sect!~/\.z?debug_info/)
     { # No DWARF info
+        if(my $DebugFile = getDebugFile($Path, "gnu_debuglink"))
+        {
+            my $DPath = $DebugFile;
+            
+            if(my $DDir = getDirname($Path))
+            {
+                $DPath = $DDir."/".$DPath;
+            }
+            
+            printMsg("INFO", "Reading $DPath (gnu_debuglink)");
+            
+            return read_DWARF_Info($DPath);
+        }
         return 0;
     }
     
@@ -1316,6 +1372,10 @@ sub read_DWARF_Dump($$)
                                 if($SYS_GCCV=~/\A(\d+\.\d+)(\.\d+|)/)
                                 { # 4.6.1 20110627 (Mandriva)
                                     $SYS_GCCV = $1.$2;
+                                }
+                                
+                                if($Val=~/(\A| )(\-O[0-3])( |\Z)/) {
+                                    printMsg("WARNING", "incompatible build option detected: $2");
                                 }
                             }
                             else {
@@ -2190,6 +2250,12 @@ sub complete_ABI()
     
     foreach my $ID (sort {int($a) <=> int($b)} keys(%SymbolInfo))
     {
+        my $Symbol = $SymbolInfo{$ID}{"MnglName"};
+        
+        if(not $Symbol) {
+            $Symbol = $SymbolInfo{$ID}{"ShortName"};
+        }
+        
         if($LIB_LANG eq "C++")
         {
             if(not $SymbolInfo{$ID}{"MnglName"})
@@ -2258,6 +2324,26 @@ sub complete_ABI()
         {
             delete($SymbolInfo{$ID});
             next;
+        }
+        elsif(defined $PublicHeadersPath)
+        {
+            if(not defined $SymbolInfo{$ID}{"Header"}
+            or not defined $PublicHeader{getFilename($SymbolInfo{$ID}{"Header"})})
+            {
+                if($OBJ_LANG eq "C")
+                {
+                    if(not defined $SymbolToHeader{$Symbol})
+                    {
+                        delete($SymbolInfo{$ID});
+                        next;
+                    }
+                }
+                else
+                {
+                    delete($SymbolInfo{$ID});
+                    next;
+                }
+            }
         }
         
         $SelectedSymbols{$ID} = $S;
@@ -4628,6 +4714,101 @@ sub dump_sorting($)
     }
 }
 
+sub getDebugFile($$)
+{
+    my ($Obj, $Header) = @_;
+    
+    my $Str = `$EU_READELF_L --strings=.$Header \"$Obj\" 2>\"$TMP_DIR/error\"`;
+    if($Str=~/0\]\s*(.+)/) {
+        return $1;
+    }
+    
+    return undef;
+}
+
+sub findFiles(@)
+{
+    my ($Path, $Type) = @_;
+    my $Cmd = "find \"$Path\"";
+    
+    if($Type) {
+        $Cmd .= " -type ".$Type;
+    }
+    
+    my @Res = split(/\n/, `$Cmd`);
+    return @Res;
+}
+
+sub isHeader($)
+{
+    my $Path = $_[0];
+    return ($Path=~/\.(h|hh|hp|hxx|hpp|h\+\+|tcc)\Z/i);
+}
+
+sub detectPublicSymbols($)
+{
+    my $Path = $_[0];
+    
+    if(not -e $Path) {
+        exitStatus("Access_Error", "can't access \'$Path\'");
+    }
+    
+    printMsg("INFO", "Detect public symbols");
+    
+    if(not check_Cmd($CTAGS))
+    {
+        printMsg("ERROR", "can't find \"$CTAGS\"");
+        return;
+    }
+    
+    my @Files = ();
+    my @Headers = ();
+    
+    if(-f $Path)
+    { # list of headers
+        @Headers = split(/\n/, readFile($Path));
+    }
+    elsif(-d $Path)
+    { # directory
+        @Files = findFiles($Path, "f");
+        
+        foreach my $File (@Files)
+        {
+            if(isHeader($File)) {
+                push(@Headers, $File);
+            }
+        }
+    }
+    
+    foreach my $File (@Headers)
+    {
+        $PublicHeader{getFilename($File)} = 1;
+    }
+    
+    if(defined $OBJ_LANG and $OBJ_LANG eq "C")
+    {
+        foreach my $File (@Headers)
+        {
+            my $HName = getFilename($File);
+            my $IgnoreTags = "";
+            
+            if(defined $IgnoreTagsPath) {
+                $IgnoreTags = "-I \@".$IgnoreTagsPath;
+            }
+            
+            my $List_S = `$CTAGS -x --c-kinds=pfxv $IgnoreTags \"$File\"`;
+            foreach my $Line (split(/\n/, $List_S))
+            {
+                if($Line=~/\A(\w+)/) {
+                    $SymbolToHeader{$1} = $HName;
+                }
+            }
+        }
+    }
+    
+    $PublicSymbols_Detected = 1;
+}
+
 sub scenario()
 {
     if($Help)
@@ -4637,7 +4818,11 @@ sub scenario()
     }
     if($ShowVersion)
     {
-        printMsg("INFO", "ABI Dumper $TOOL_VERSION\nCopyright (C) 2015 Andrey Ponomarenko's ABI Laboratory\nLicense: LGPL or GPL <http://www.gnu.org/licenses/>\nThis program is free software: you can redistribute it and/or modify it.\n\nWritten by Andrey Ponomarenko.");
+        printMsg("INFO", "ABI Dumper $TOOL_VERSION");
+        printMsg("INFO", "Copyright (C) 2015 Andrey Ponomarenko's ABI Laboratory");
+        printMsg("INFO", "License: LGPL or GPL <http://www.gnu.org/licenses/>");
+        printMsg("INFO", "This program is free software: you can redistribute it and/or modify it.\n");
+        printMsg("INFO", "Written by Andrey Ponomarenko.");
         exit(0);
     }
     if($DumpVersion)
@@ -4773,15 +4958,13 @@ sub scenario()
             {
                 if($Sect=~/\.gnu_debugaltlink/)
                 {
-                    my $Str = `$EU_READELF_L --strings=.gnu_debugaltlink \"$Obj\" 2>\"$TMP_DIR/error\"`;
-                    
-                    if($Str=~/0\]\s*(.+)/)
+                    if(my $AltDebugFile = getDebugFile($Obj, "gnu_debugaltlink"))
                     {
-                        my $AltObj_R = getDirname($Obj)."/".$1;
+                        my $AltObj_R = getDirname($Obj)."/".$AltDebugFile;
                         
                         my $AltObj = $AltObj_R;
                         
-                        while($AltObj=~s/\/[^\/]+\/\.\.\//\//){};
+                        while($AltObj=~s&/[^/]+/\.\./&/&){};
                         
                         if(-e $AltObj)
                         {
@@ -4795,25 +4978,6 @@ sub scenario()
                     }
                 }
                 last;
-            }
-        }
-    }
-    
-    if(defined $HeaderSymbolsPath)
-    {
-        if(not -f $HeaderSymbolsPath)
-        {
-            exitStatus("Access_Error", "can't access \'$HeaderSymbolsPath\'");
-        }
-        
-        if(my $HeaderSymbols = eval(readFile($HeaderSymbolsPath)))
-        {
-            foreach my $P (sort keys(%{$HeaderSymbols}))
-            {
-                foreach my $S (sort keys(%{$HeaderSymbols->{$P}}))
-                {
-                    $SymbolToHeader{$S} = getFilename($P);
-                }
             }
         }
     }
@@ -4842,6 +5006,14 @@ sub scenario()
         }
         
         read_Symbols($Obj);
+        
+        if(not defined $PublicSymbols_Detected)
+        {
+            if(defined $PublicHeadersPath) {
+                detectPublicSymbols($PublicHeadersPath);
+            }
+        }
+        
         $Res += read_DWARF_Info($Obj);
         
         %DWARF_Info = ();
@@ -4875,6 +5047,16 @@ sub scenario()
     %TName_Tid = ();
     %TName_Tids = ();
     %SymbolTable = ();
+    
+    if(defined $PublicHeadersPath)
+    {
+        foreach my $H (keys(%HeadersInfo))
+        {
+            if(not defined $PublicHeader{getFilename($H)}) {
+                delete($HeadersInfo{$H});
+            }
+        }
+    }
     
     dump_ABI();
     
