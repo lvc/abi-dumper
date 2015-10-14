@@ -1672,6 +1672,10 @@ sub dump_ABI()
         $ABI{"Compiler"} = $SYS_COMP;
     }
     
+    if(defined $PublicHeadersPath) {
+        $ABI{"PublicABI"} = "1";
+    }
+    
     my $ABI_DUMP = Dumper(\%ABI);
     
     if($StdOut)
