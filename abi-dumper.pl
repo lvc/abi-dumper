@@ -1632,6 +1632,7 @@ sub read_Vtables($)
             if($TypeInfo{$Tid}{"Type"}=~/\A(Struct|Class)\Z/)
             {
                 my $TName = $TypeInfo{$Tid}{"Name"};
+                $TName=~s/\bstruct //g;
                 if(defined $VirtualTable{$TName})
                 {
                     %{$TypeInfo{$Tid}{"VTable"}} = %{$VirtualTable{$TName}};
@@ -2771,10 +2772,12 @@ sub getTypeInfo($)
         }
     }
     
+    my $RealType = $TInfo{"Type"};
+    
     if(defined $ClassMethods{$ID})
     {
         if($TInfo{"Type"} eq "Struct") {
-            $TInfo{"Type"} = "Class";
+            $RealType = "Class";
         }
     }
     
@@ -2794,7 +2797,7 @@ sub getTypeInfo($)
             }
         }
     }
-    if($TInfo{"Type"} eq "Class") {
+    if($RealType eq "Class") {
         $TInfo{"Copied"} = 1; # will be changed in getSymbolInfo()
     }
     
@@ -3682,7 +3685,10 @@ sub getSymbolInfo($)
                 }
                 else
                 { # NOTE: default access of class methods in the debug info is "private"
-                    $SInfo{"Private"} = 1;
+                    if($TypeInfo{$SInfo{"Class"}}{"Type"} eq "Class")
+                    {
+                        $SInfo{"Private"} = 1;
+                    }
                 }
                 
                 # clean origin
@@ -3753,7 +3759,10 @@ sub getSymbolInfo($)
         {
             if(defined $TypeInfo{$NS})
             { # NOTE: default access of class methods in the debug info is "private"
-                $SInfo{"Private"} = 1;
+                if($TypeInfo{$NS}{"Type"} eq "Class")
+                {
+                    $SInfo{"Private"} = 1;
+                }
             }
         }
     }
@@ -3762,6 +3771,7 @@ sub getSymbolInfo($)
     {
         $SInfo{"Class"} = $Class;
     }
+    
     if(my $NS = $NameSpace{$ID})
     {
         if($DWARF_Info{$NS}{"Kind"} eq "namespace") {
