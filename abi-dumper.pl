@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.99.11
+# ABI Dumper 0.99.12
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013-2015 Andrey Ponomarenko's ABI Laboratory
@@ -23,7 +23,7 @@
 #
 # COMPATIBILITY
 # =============
-#  ABI Compliance Checker >= 1.99.13
+#  ABI Compliance Checker >= 1.99.14
 #
 #
 # This program is free software: you can redistribute it and/or modify
@@ -47,7 +47,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.99.11";
+my $TOOL_VERSION = "0.99.12";
 my $ABI_DUMP_VERSION = "3.2";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -471,6 +471,8 @@ my %ELF_BIND = map {$_=>1} (
 my %ELF_TYPE = map {$_=>1} (
     "FUNC",
     "IFUNC",
+    "GNU_IFUNC",
+    "TLS",
     "OBJECT",
     "COMMON"
 );
@@ -586,7 +588,7 @@ sub read_Symbols($)
                 }
                 if(not $AllSymbols)
                 { # do nothing with symtab
-                    next;
+                    #next;
                 }
             }
             elsif(index($_, "'.symtab'")!=-1)
@@ -626,19 +628,27 @@ sub read_Symbols($)
                     }
                 }
             }
-            
-            foreach ($SectionInfo{$Ndx}, "")
+            else
             {
-                my $Val = $Value;
-                
-                $SymbolTable{$_}{$Val}{$Symbol} = 1;
-                
-                if($Val=~s/\A[0]+//)
+                $Symbol_Value{$Symbol} = $Value;
+                $Value_Symbol{$Value}{$Symbol} = 1;
+            }
+            
+            if(not $symtab)
+            {
+                foreach ($SectionInfo{$Ndx}, "")
                 {
-                    if($Val eq "") {
-                        $Val = "0";
-                    }
+                    my $Val = $Value;
+                    
                     $SymbolTable{$_}{$Val}{$Symbol} = 1;
+                    
+                    if($Val=~s/\A[0]+//)
+                    {
+                        if($Val eq "") {
+                            $Val = "0";
+                        }
+                        $SymbolTable{$_}{$Val}{$Symbol} = 1;
+                    }
                 }
             }
         }
@@ -650,26 +660,26 @@ sub read_Symbols($)
     }
     
     my %Found = ();
-    foreach my $Symbol (keys(%{$Library_Symbol{$TargetName}}))
+    foreach my $Symbol (sort keys(%Symbol_Value))
     {
         next if(index($Symbol,"\@")==-1);
         if(my $Value = $Symbol_Value{$Symbol})
         {
-            foreach my $Symbol_SameValue (keys(%{$Value_Symbol{$Value}}))
+            foreach my $Symbol_SameValue (sort keys(%{$Value_Symbol{$Value}}))
             {
                 if($Symbol_SameValue ne $Symbol
                 and index($Symbol_SameValue,"\@")==-1)
                 {
                     $SymVer{$Symbol_SameValue} = $Symbol;
                     $Found{$Symbol} = 1;
-                    last;
+                    #last;
                 }
             }
         }
     }
     
     # default
-    foreach my $Symbol (keys(%{$Library_Symbol{$TargetName}}))
+    foreach my $Symbol (sort keys(%Symbol_Value))
     {
         next if(defined $Found{$Symbol});
         next if(index($Symbol,"\@\@")==-1);
@@ -683,7 +693,7 @@ sub read_Symbols($)
     }
     
     # non-default
-    foreach my $Symbol (keys(%{$Library_Symbol{$TargetName}}))
+    foreach my $Symbol (sort keys(%Symbol_Value))
     {
         next if(defined $Found{$Symbol});
         next if(index($Symbol,"\@")==-1);
@@ -1008,7 +1018,7 @@ sub read_DWARF_Info($)
     
     while(<LOC>)
     {
-        if(/\[\s*(\w+)\].*\[\s*\w+\]\s*(.+)\Z/) {
+        if(/\A \[\s*(\w+)\].*\[\s*\w+\]\s*(.+)\Z/) {
             $DebugLoc{$1} = $2;
         }
         elsif(/\A \[\s*(\w+)\]/) {
@@ -2332,22 +2342,11 @@ sub complete_ABI()
         }
         elsif(defined $PublicHeadersPath)
         {
-            if(not defined $SymbolInfo{$ID}{"Header"}
-            or not defined $PublicHeader{getFilename($SymbolInfo{$ID}{"Header"})})
+            if(not selectPublic($Symbol, $ID)
+            and (not defined $SymbolInfo{$ID}{"Alias"} or not selectPublic($SymbolInfo{$ID}{"Alias"}, $ID)))
             {
-                if($OBJ_LANG eq "C")
-                {
-                    if(not defined $SymbolToHeader{$Symbol})
-                    {
-                        delete($SymbolInfo{$ID});
-                        next;
-                    }
-                }
-                else
-                {
-                    delete($SymbolInfo{$ID});
-                    next;
-                }
+                delete($SymbolInfo{$ID});
+                next;
             }
         }
         
@@ -2355,6 +2354,34 @@ sub complete_ABI()
         
         delete($SymbolInfo{$ID}{"External"});
     }
+}
+
+sub selectPublic($$)
+{
+    my ($Symbol, $ID) = @_;
+    
+    if(not defined $SymbolInfo{$ID}{"Header"}
+    or not defined $PublicHeader{getFilename($SymbolInfo{$ID}{"Header"})})
+    {
+        if($OBJ_LANG eq "C")
+        {
+            if(not defined $SymbolToHeader{$Symbol})
+            {
+                return 0;
+            }
+            elsif(defined $SymbolInfo{$ID}{"Header"}
+            and $SymbolInfo{$ID}{"Header"} ne $SymbolToHeader{$Symbol}
+            and not defined $SymbolInfo{$ID}{"Alias"})
+            {
+                return 0;
+            }
+        }
+        else {
+            return 0;
+        }
+    }
+    
+    return 1;
 }
 
 sub cloneSymbol($$)
@@ -3589,6 +3616,7 @@ sub getSymbolInfo($)
             
             delete($SInfo{"MnglName"});
             $MnglName = $ShortName;
+            # $ShortName = $SInfo{"ShortName"};
         }
     }
     else
@@ -3856,7 +3884,7 @@ sub getSymbolInfo($)
     
     if(not $SInfo{"Header"})
     {
-        if(defined $SInfo{"Class"})
+        if($SInfo{"Class"})
         { # detect missed header by class
             if(defined $TypeInfo{$SInfo{"Class"}}{"Header"}) {
                 $SInfo{"Header"} = $TypeInfo{$SInfo{"Class"}}{"Header"};
@@ -3868,6 +3896,18 @@ sub getSymbolInfo($)
     {
         if(defined $SymbolToHeader{$MnglName}) {
             $SInfo{"Header"} = $SymbolToHeader{$MnglName};
+        }
+        elsif(not $SInfo{"Class"}
+        and defined $SymbolToHeader{$SInfo{"ShortName"}}) {
+            $SInfo{"Header"} = $SymbolToHeader{$SInfo{"ShortName"}};
+        }
+    }
+    elsif($SInfo{"Alias"})
+    {
+        if(defined $SymbolToHeader{$SInfo{"Alias"}}
+        and $SymbolToHeader{$SInfo{"Alias"}} ne $SInfo{"Header"})
+        { # TODO: review this case
+            $SInfo{"Header"} = $SymbolToHeader{$SInfo{"Alias"}};
         }
     }
     
@@ -4799,8 +4839,8 @@ sub detectPublicSymbols($)
         $PublicHeader{getFilename($File)} = 1;
     }
     
-    if(defined $OBJ_LANG and $OBJ_LANG eq "C")
-    {
+    #if(defined $OBJ_LANG and $OBJ_LANG eq "C")
+    #{
         foreach my $File (@Headers)
         {
             my $HName = getFilename($File);
@@ -4818,7 +4858,7 @@ sub detectPublicSymbols($)
                 }
             }
         }
-    }
+    #}
     
     $PublicSymbols_Detected = 1;
 }
