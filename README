@@ -23,7 +23,7 @@ EXAMPLES:
   abi-dumper drm/nouveau/nouveau.ko.debug
   
 NOTE:
-  Input objects should be compiled with -g additional option to contain DWARF debug info.
+  Input objects should be compiled with -g -Og additional options to contain DWARF debug info.
   
 ABI CHECK:
   abi-dumper libTest.so.0 -o ABIv0.dump
