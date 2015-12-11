@@ -1,5 +1,5 @@
 NAME:
-  ABI Dumper - a tool to dump ABI of an ELF object containing DWARF debug info.
+  ABI Dumper — a tool to dump ABI of an ELF object containing DWARF debug info.
   
   The tool is intended to be used with ABI Compliance Checker tool for tracking
   ABI changes of a C/C++ library or kernel module.
@@ -29,7 +29,11 @@ ABI CHECK:
   abi-dumper libTest.so.0 -o ABIv0.dump
   abi-dumper libTest.so.1 -o ABIv1.dump
   abi-compliance-checker -l libTest -old ABIv0.dump -new ABIv1.dump
-  
+
+FILTER PUBLIC ABI:
+  abi-dumper libTest.so -public-headers PATH
+  PATH — path to install tree of a library
+
 COMPATIBILITY:
   ABI Compliance Checker >= 1.99.8 (https://github.com/lvc/abi-compliance-checker)
 

@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.99.12
+# ABI Dumper 0.99.13
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013-2015 Andrey Ponomarenko's ABI Laboratory
@@ -47,7 +47,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.99.12";
+my $TOOL_VERSION = "0.99.13";
 my $ABI_DUMP_VERSION = "3.2";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -1376,7 +1376,7 @@ sub read_DWARF_Dump($$)
                             $Val=~s/\A\"//;
                             $Val=~s/\"\Z//;
                             
-                            if($Val=~/GNU\s+(C|C\+\+)\s+(.+)\Z/)
+                            if($Val=~/GNU\s+(C\d*|C\+\+)\s+(.+)\Z/)
                             {
                                 $SYS_GCCV = $2;
                                 if($SYS_GCCV=~/\A(\d+\.\d+)(\.\d+|)/)
@@ -2808,7 +2808,8 @@ sub getTypeInfo($)
         }
     }
     
-    if(my $BaseType = $DWARF_Info{$ID}{"type"})
+    if($TInfo{"Type"} ne "Enum"
+    and my $BaseType = $DWARF_Info{$ID}{"type"})
     {
         $TInfo{"BaseType"} = "$BaseType";
         
@@ -3119,7 +3120,8 @@ sub getTypeInfo($)
         }
     }
     
-    if(not $TInfo{"Name"})
+    if(not $TInfo{"Name"}
+    and $TInfo{"Type"} ne "Enum")
     {
         my $ID_ = $ID;
         my $BaseID = undef;

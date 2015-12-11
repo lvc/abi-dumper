@@ -6,8 +6,8 @@ All rights reserved.
 RELEASE INFORMATION
 
 Project:           ABI Dumper
-Version:           0.99.12
-Date:              2015-11-01
+Version:           0.99.13
+Date:              2015-12-11
 
 
 This file explains how to install and setup environment
@@ -17,8 +17,8 @@ for the tool in your computer.
 Content:
 
    1. Requirements for Linux and FreeBSD
-   2. Configuring and Installing
-   3. Running the Tool
+   2. Configure and Install
+   3. Usage
 
 
 1. REQUIREMENTS FOR LINUX AND FREEBSD
@@ -30,27 +30,32 @@ Content:
 
 
 
-4. CONFIGURING AND INSTALLING
-=============================
+2. CONFIGURE AND INSTALL
+========================
 
    This command will install an abi-dumper program in the
    PREFIX/bin system directory:
 
      sudo make install prefix=PREFIX [/usr, /usr/local, ...]
 
-4.1 Remove
+2.1 Remove
 
      sudo make uninstall prefix=PREFIX
 
 
 
-5. RUNNING THE TOOL
-===================
+3. USAGE
+========
 
-   1. abi-dumper libTest.so -o ABI.dump
-      abi-dumper Module.ko.debug -o ABI.dump
+   Dump ABI of a library:
+   
+     abi-dumper libTest.so -o ABI.dump
+     
+   Dump ABI of a kernel module:
+   
+     abi-dumper Module.ko.debug -o ABI.dump
 
-   2. For advanced usage, see output of --help option
+   For advanced usage, see output of --help option
 
 
 
