@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.99.13
+# ABI Dumper 0.99.14
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013-2015 Andrey Ponomarenko's ABI Laboratory
@@ -47,7 +47,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.99.13";
+my $TOOL_VERSION = "0.99.14";
 my $ABI_DUMP_VERSION = "3.2";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -353,6 +353,7 @@ my $InvalidDebugLoc;
 
 # Public Headers
 my %SymbolToHeader;
+my %TypeToHeader;
 my %PublicHeader;
 my $PublicSymbols_Detected;
 
@@ -2198,6 +2199,17 @@ sub complete_ABI()
         }
     }
     
+    foreach my $Tid (sort {int($a) <=> int($b)} keys(%TypeInfo))
+    {
+        if(defined $PublicHeadersPath)
+        {
+            if(not selectPublicType($Tid))
+            {
+                $TypeInfo{$Tid}{"PrivateABI"} = 1;
+            }
+        }
+    }
+    
     foreach my $Tid (keys(%Delete))
     {
         my $TN = $TypeInfo{$Tid}{"Name"};
@@ -2354,6 +2366,42 @@ sub complete_ABI()
         
         delete($SymbolInfo{$ID}{"External"});
     }
+}
+
+sub selectPublicType($)
+{
+    my $Tid = $_[0];
+    
+    if($TypeInfo{$Tid}{"Type"}!~/\A(Struct|Class|Union|Enum)\Z/) {
+        return 1;
+    }
+    
+    my $TName = $TypeInfo{$Tid}{"Name"};
+    $TName=~s/\A(struct|class|union|enum) //g;
+    
+    my $Header = $TypeInfo{$Tid}{"Header"};
+    
+    if(not defined $Header
+    or not defined $PublicHeader{getFilename($Header)})
+    {
+        if($OBJ_LANG eq "C")
+        {
+            if(not defined $TypeToHeader{$TName})
+            {
+                return 0;
+            }
+            elsif(defined $Header
+            and $Header ne $TypeToHeader{$TName})
+            {
+                return 0;
+            }
+        }
+        else {
+            return 0;
+        }
+    }
+    
+    return 1;
 }
 
 sub selectPublic($$)
@@ -4841,26 +4889,34 @@ sub detectPublicSymbols($)
         $PublicHeader{getFilename($File)} = 1;
     }
     
-    #if(defined $OBJ_LANG and $OBJ_LANG eq "C")
-    #{
-        foreach my $File (@Headers)
+    foreach my $File (@Headers)
+    {
+        my $HName = getFilename($File);
+        my $IgnoreTags = "";
+        
+        if(defined $IgnoreTagsPath) {
+            $IgnoreTags = "-I \@".$IgnoreTagsPath;
+        }
+        
+        my $List_S = `$CTAGS -x --c-kinds=pfxv $IgnoreTags \"$File\"`;
+        foreach my $Line (split(/\n/, $List_S))
         {
-            my $HName = getFilename($File);
-            my $IgnoreTags = "";
-            
-            if(defined $IgnoreTagsPath) {
-                $IgnoreTags = "-I \@".$IgnoreTagsPath;
+            if($Line=~/\A(\w+)/) {
+                $SymbolToHeader{$1} = $HName;
             }
-            
-            my $List_S = `$CTAGS -x --c-kinds=pfxv $IgnoreTags \"$File\"`;
-            foreach my $Line (split(/\n/, $List_S))
+        }
+        
+        if($OBJ_LANG eq "C")
+        {
+            my $List_T = `$CTAGS -x --c-kinds=csugt $IgnoreTags \"$File\"`;
+            foreach my $Line (split(/\n/, $List_T))
             {
                 if($Line=~/\A(\w+)/) {
-                    $SymbolToHeader{$1} = $HName;
+                    $TypeToHeader{$1} = $HName;
                 }
             }
         }
-    #}
+    }
     
     $PublicSymbols_Detected = 1;
 }
