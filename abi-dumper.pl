@@ -3,7 +3,7 @@
 # ABI Dumper 0.99.14
 # Dump ABI of an ELF object containing DWARF debug info
 #
-# Copyright (C) 2013-2015 Andrey Ponomarenko's ABI Laboratory
+# Copyright (C) 2013-2016 Andrey Ponomarenko's ABI Laboratory
 #
 # Written by Andrey Ponomarenko
 #
@@ -85,7 +85,7 @@ my %ERROR_CODE = (
 
 my $ShortUsage = "ABI Dumper $TOOL_VERSION
 Dump ABI of an ELF object containing DWARF debug info
-Copyright (C) 2015 Andrey Ponomarenko's ABI Laboratory
+Copyright (C) 2016 Andrey Ponomarenko's ABI Laboratory
 License: GNU LGPL or GNU GPL
 
 Usage: $CmdName [options] [object]
@@ -4931,7 +4931,7 @@ sub scenario()
     if($ShowVersion)
     {
         printMsg("INFO", "ABI Dumper $TOOL_VERSION");
-        printMsg("INFO", "Copyright (C) 2015 Andrey Ponomarenko's ABI Laboratory");
+        printMsg("INFO", "Copyright (C) 2016 Andrey Ponomarenko's ABI Laboratory");
         printMsg("INFO", "License: LGPL or GPL <http://www.gnu.org/licenses/>");
         printMsg("INFO", "This program is free software: you can redistribute it and/or modify it.\n");
         printMsg("INFO", "Written by Andrey Ponomarenko.");
