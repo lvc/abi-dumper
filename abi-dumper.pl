@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.99.14
+# ABI Dumper 0.99.15
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013-2016 Andrey Ponomarenko's ABI Laboratory
@@ -16,10 +16,8 @@
 #  Perl 5 (5.8 or newer)
 #  Elfutils (eu-readelf)
 #  Vtable-Dumper (1.1 or newer)
-#
-# SUGGESTS
-# ========
 #  Ctags (5.8 or newer)
+#  Binutils (objdump)
 #
 # COMPATIBILITY
 # =============
@@ -47,7 +45,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.99.14";
+my $TOOL_VERSION = "0.99.15";
 my $ABI_DUMP_VERSION = "3.2";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -58,13 +56,14 @@ my $VTABLE_DUMPER_VERSION = "1.0";
 my $LOCALE = "LANG=C.UTF-8";
 my $EU_READELF = "eu-readelf";
 my $EU_READELF_L = $LOCALE." ".$EU_READELF;
+my $OBJDUMP = "objdump";
 my $CTAGS = "ctags";
 
 my ($Help, $ShowVersion, $DumpVersion, $OutputDump, $SortDump, $StdOut,
 $TargetVersion, $ExtraInfo, $FullDump, $AllTypes, $AllSymbols, $BinOnly,
 $SkipCxx, $Loud, $AddrToName, $DumpStatic, $Compare, $AltDebugInfo,
 $AddDirs, $VTDumperPath, $SymbolsListPath, $PublicHeadersPath,
-$IgnoreTagsPath);
+$IgnoreTagsPath, $KernelExport);
 
 my $CmdName = getFilename($0);
 
@@ -124,6 +123,7 @@ GetOptions("h|help!" => \$Help,
   "vt-dumper=s" => \$VTDumperPath,
   "public-headers=s" => \$PublicHeadersPath,
   "ignore-tags=s" => \$IgnoreTagsPath,
+  "kernel-export!" => \$KernelExport,
 # internal options
   "addr2name!" => \$AddrToName
 ) or ERR_MESSAGE();
@@ -231,6 +231,11 @@ GENERAL OPTIONS:
   -ignore-tags PATH
       Path to ignore.tags file to help ctags tool to read
       symbols in header files.
+  
+  -kernel-export
+      Dump symbols exported by the Linux kernel and modules, i.e.
+      symbols declared in the ksymtab section of the object and
+      system calls.
 ";
 
 sub HELP_MESSAGE() {
@@ -356,6 +361,9 @@ my %SymbolToHeader;
 my %TypeToHeader;
 my %PublicHeader;
 my $PublicSymbols_Detected;
+
+# Kernel
+my %KSymTab;
 
 # Filter
 my %SymbolsList;
@@ -530,13 +538,45 @@ sub read_Symbols($)
     }
     
     my %SectionInfo;
+    my %KSect;
     
     my $Cmd = $EU_READELF_L." -S \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
     foreach (split(/\n/, `$Cmd`))
     {
         if(/\[\s*(\d+)\]\s+([\w\.]+)/)
         {
-            $SectionInfo{$1} = $2;
+            my ($Num, $Name) = ($1, $2);
+            
+            $SectionInfo{$Num} = $Name;
+            
+            if(defined $KernelExport)
+            {
+                if($Name=~/\A(__ksymtab|__ksymtab_gpl)\Z/) {
+                    $KSect{$1} = 1;
+                }
+            }
+        }
+    }
+    
+    if(defined $KernelExport)
+    {
+        if(not keys(%KSect))
+        {
+            printMsg("ERROR", "can't find __ksymtab or __ksymtab_gpl sections in the object");
+            exit(1);
+        }
+        
+        foreach my $Name (sort keys(%KSect))
+        {
+            $Cmd = $OBJDUMP." --section=$Name -d \"$Lib_Path\" 2>\"$TMP_DIR/error\"";
+            
+            foreach my $Line (split(/\n/, qx/$Cmd/))
+            {
+                if($Line=~/<__ksymtab_(.+?)>/)
+                {
+                    $KSymTab{$1} = 1;
+                }
+            }
         }
     }
     
@@ -625,6 +665,17 @@ sub read_Symbols($)
                         if(index($Symbol, "_Z")==0)
                         {
                             $OBJ_LANG = "C++";
+                        }
+                    }
+                }
+                
+                if(defined $KernelExport)
+                {
+                    if($Bind ne "LOCAL")
+                    {
+                        if(index($Symbol, "sys_")==0
+                        or index($Symbol, "SyS_")==0) {
+                            $KSymTab{$Symbol} = 1;
                         }
                     }
                 }
@@ -2041,6 +2092,19 @@ sub read_ABI()
                     }
                 }
             }
+            
+            if(defined $PublicHeadersPath)
+            {
+                if(not $TypeInfo{$Tid}{"Header"})
+                {
+                    my $TName = $TypeInfo{$Tid}{"Name"};
+                    $TName=~s/\A(struct|class|union|enum) //g;
+                    
+                    if(defined $TypeToHeader{$TName}) {
+                        $TypeInfo{$Tid}{"Header"} = $TypeToHeader{$TName};
+                    }
+                }
+            }
         }
     }
     
@@ -2356,6 +2420,14 @@ sub complete_ABI()
         {
             if(not selectPublic($Symbol, $ID)
             and (not defined $SymbolInfo{$ID}{"Alias"} or not selectPublic($SymbolInfo{$ID}{"Alias"}, $ID)))
+            {
+                delete($SymbolInfo{$ID});
+                next;
+            }
+        }
+        elsif(defined $KernelExport)
+        {
+            if(not defined $KSymTab{$Symbol})
             {
                 delete($SymbolInfo{$ID});
                 next;
@@ -4898,7 +4970,7 @@ sub detectPublicSymbols($)
             $IgnoreTags = "-I \@".$IgnoreTagsPath;
         }
         
-        my $List_S = `$CTAGS -x --c-kinds=pfxv $IgnoreTags \"$File\"`;
+        my $List_S = `$CTAGS -x --c-kinds=fpvx $IgnoreTags \"$File\"`;
         foreach my $Line (split(/\n/, $List_S))
         {
             if($Line=~/\A(\w+)/) {
@@ -4908,7 +4980,7 @@ sub detectPublicSymbols($)
         
         if($OBJ_LANG eq "C")
         {
-            my $List_T = `$CTAGS -x --c-kinds=csugt $IgnoreTags \"$File\"`;
+            my $List_T = `$CTAGS -x --c-kinds=cgsu $IgnoreTags \"$File\"`;
             foreach my $Line (split(/\n/, $List_T))
             {
                 if($Line=~/\A(\w+)/) {
@@ -5003,7 +5075,7 @@ sub scenario()
                 if(my $MnglName = $Info->{"MnglName"}) {
                     $SymInfo{$_}{$MnglName} = $Info;
                 }
-                elsif(my $ShortName = $Info->{"MnglName"}) {
+                elsif(my $ShortName = $Info->{"ShortName"}) {
                     $SymInfo{$_}{$ShortName} = $Info;
                 }
             }
