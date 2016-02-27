@@ -651,6 +651,21 @@ sub read_Symbols($)
                     next;
                 }
                 
+                if(defined $KernelExport)
+                {
+                    if($Bind ne "LOCAL")
+                    {
+                        if(index($Symbol, "sys_")==0
+                        or index($Symbol, "SyS_")==0) {
+                            $KSymTab{$Symbol} = 1;
+                        }
+                    }
+                    
+                    if(not defined $KSymTab{$Symbol}) {
+                        next;
+                    }
+                }
+                
                 if($Bind ne "LOCAL") {
                     $Library_Symbol{$TargetName}{$Symbol} = ($Type eq "OBJECT")?-$Size:1;
                 }
@@ -665,17 +680,6 @@ sub read_Symbols($)
                         if(index($Symbol, "_Z")==0)
                         {
                             $OBJ_LANG = "C++";
-                        }
-                    }
-                }
-                
-                if(defined $KernelExport)
-                {
-                    if($Bind ne "LOCAL")
-                    {
-                        if(index($Symbol, "sys_")==0
-                        or index($Symbol, "SyS_")==0) {
-                            $KSymTab{$Symbol} = 1;
                         }
                     }
                 }
