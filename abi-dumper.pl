@@ -18,6 +18,7 @@
 #  Vtable-Dumper (1.1 or newer)
 #  Ctags (5.8 or newer)
 #  Binutils (objdump)
+#  Ctags
 #
 # COMPATIBILITY
 # =============

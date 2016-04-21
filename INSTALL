@@ -29,6 +29,7 @@ Content:
    3. Vtable-Dumper (1.1 or newer)
    4. Ctags (5.8 or newer)
    5. Binutils (objdump)
+   6. Ctags
 
 
 
