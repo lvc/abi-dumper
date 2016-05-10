@@ -16,9 +16,8 @@
 #  Perl 5 (5.8 or newer)
 #  Elfutils (eu-readelf)
 #  Vtable-Dumper (1.1 or newer)
-#  Ctags (5.8 or newer)
 #  Binutils (objdump)
-#  Ctags
+#  Universal Ctags
 #
 # COMPATIBILITY
 # =============

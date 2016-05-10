@@ -27,9 +27,8 @@ Content:
    1. Perl 5 (5.8 or newer)
    2. Elfutils (eu-readelf)
    3. Vtable-Dumper (1.1 or newer)
-   4. Ctags (5.8 or newer)
-   5. Binutils (objdump)
-   6. Ctags
+   4. Binutils (objdump)
+   5. Universal Ctags
 
 
 

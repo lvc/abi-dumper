@@ -13,7 +13,7 @@ REQUIRES:
   Perl 5 (5.8 or newer)
   Elfutils (eu-readelf)
   Vtable Dumper (1.0 or newer, https://github.com/lvc/vtable-dumper)
-  Ctags
+  Universal Ctags
 
 USAGE:
   abi-dumper libTest.so -o ABI.dump
