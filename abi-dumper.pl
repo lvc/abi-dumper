@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.99.15
+# ABI Dumper 0.99.16
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013-2016 Andrey Ponomarenko's ABI Laboratory
@@ -18,6 +18,7 @@
 #  Vtable-Dumper (1.1 or newer)
 #  Binutils (objdump)
 #  Universal Ctags
+#  GCC (g++)
 #
 # COMPATIBILITY
 # =============
@@ -45,7 +46,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.99.15";
+my $TOOL_VERSION = "0.99.16";
 my $ABI_DUMP_VERSION = "3.2";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -58,12 +59,14 @@ my $EU_READELF = "eu-readelf";
 my $EU_READELF_L = $LOCALE." ".$EU_READELF;
 my $OBJDUMP = "objdump";
 my $CTAGS = "ctags";
+my $GPP = "g++";
 
 my ($Help, $ShowVersion, $DumpVersion, $OutputDump, $SortDump, $StdOut,
 $TargetVersion, $ExtraInfo, $FullDump, $AllTypes, $AllSymbols, $BinOnly,
 $SkipCxx, $Loud, $AddrToName, $DumpStatic, $Compare, $AltDebugInfo,
 $AddDirs, $VTDumperPath, $SymbolsListPath, $PublicHeadersPath,
-$IgnoreTagsPath, $KernelExport);
+$IgnoreTagsPath, $KernelExport, $UseTU, $ReimplementStd,
+$IncludePreamble, $IncludePaths, $CacheHeaders);
 
 my $CmdName = getFilename($0);
 
@@ -123,7 +126,13 @@ GetOptions("h|help!" => \$Help,
   "vt-dumper=s" => \$VTDumperPath,
   "public-headers=s" => \$PublicHeadersPath,
   "ignore-tags=s" => \$IgnoreTagsPath,
+  "reimplement-std!" => \$ReimplementStd,
   "kernel-export!" => \$KernelExport,
+# extra options
+  "use-tu-dump!" => \$UseTU,
+  "include-preamble=s" => \$IncludePreamble,
+  "include-paths=s" => \$IncludePaths,
+  "cache-headers=s" => \$CacheHeaders,
 # internal options
   "addr2name!" => \$AddrToName
 ) or ERR_MESSAGE();
@@ -232,10 +241,35 @@ GENERAL OPTIONS:
       Path to ignore.tags file to help ctags tool to read
       symbols in header files.
   
+  -reimplement-std
+      This option should be specified if you are using
+      -public-headers option and the library reimplements
+      some standard symbols (e.g. malloc).
+  
   -kernel-export
       Dump symbols exported by the Linux kernel and modules, i.e.
       symbols declared in the ksymtab section of the object and
       system calls.
+
+EXTRA OPTIONS:
+  -use-tu-dump
+      Use g++ -fdump-translation-unit instead of ctags to
+      list symbols in headers. This may be useful if all
+      functions are declared via macros in headers and
+      ctags can't recognize them.
+  
+  -include-preamble PATHS
+      Specify header files (separated by semicolon) that
+      should be included before others to compile without
+      errors.
+  
+  -include-paths DIRS
+      Specify include directories (separated by semicolon)
+      that should be passed to the compiler by -I option
+      in order to compile headers without errors.
+  
+  -cache-headers DIR
+      Cache headers analysis results to reuse later.
 ";
 
 sub HELP_MESSAGE() {
@@ -2497,7 +2531,9 @@ sub selectPublic($$)
             and $SymbolInfo{$ID}{"Header"} ne $SymbolToHeader{$Symbol}
             and not defined $SymbolInfo{$ID}{"Alias"})
             {
-                return 0;
+                if(not $ReimplementStd) {
+                    return 0;
+                }
             }
         }
         else {
@@ -4933,16 +4969,32 @@ sub detectPublicSymbols($)
         exitStatus("Access_Error", "can't access \'$Path\'");
     }
     
+    my $Path_A = abs_path($Path);
+    
     printMsg("INFO", "Detect public symbols");
     
-    if(not check_Cmd($CTAGS))
+    if($UseTU)
     {
-        printMsg("ERROR", "can't find \"$CTAGS\"");
-        return;
+        if(not check_Cmd($GPP))
+        {
+            printMsg("ERROR", "can't find \"$GPP\"");
+            return;
+        }
     }
+    else
+    {
+        if(not check_Cmd($CTAGS))
+        {
+            printMsg("ERROR", "can't find \"$CTAGS\"");
+            return;
+        }
+    }
+    
+    $PublicSymbols_Detected = 1;
     
     my @Files = ();
     my @Headers = ();
+    my @DefaultInc = ();
     
     if(-f $Path)
     { # list of headers
@@ -4958,6 +5010,33 @@ sub detectPublicSymbols($)
                 push(@Headers, $File);
             }
         }
+        
+        push(@DefaultInc, $Path_A);
+        
+        if(-d $Path_A."/include") {
+            push(@DefaultInc, $Path_A."/include");
+        }
+    }
+    
+    my $PublicHeader_F = $CacheHeaders."/PublicHeader.data";
+    my $SymbolToHeader_F = $CacheHeaders."/SymbolToHeader.data";
+    my $TypeToHeader_F = $CacheHeaders."/TypeToHeader.data";
+    my $Path_F = $CacheHeaders."/PATH";
+    
+    if($CacheHeaders
+    and -f $PublicHeader_F
+    and -f $SymbolToHeader_F
+    and -f $TypeToHeader_F
+    and -f $Path_F)
+    {
+        if(readFile($Path_F) eq $Path_A)
+        {
+            %PublicHeader = %{eval(readFile($PublicHeader_F))};
+            %SymbolToHeader = %{eval(readFile($SymbolToHeader_F))};
+            %TypeToHeader = %{eval(readFile($TypeToHeader_F))};
+            
+            return;
+        }
     }
     
     foreach my $File (@Headers)
@@ -4965,36 +5044,154 @@ sub detectPublicSymbols($)
         $PublicHeader{getFilename($File)} = 1;
     }
     
+    my $Is_C = ($OBJ_LANG eq "C");
+    
     foreach my $File (@Headers)
     {
         my $HName = getFilename($File);
-        my $IgnoreTags = "";
         
-        if(defined $IgnoreTagsPath) {
-            $IgnoreTags = "-I \@".$IgnoreTagsPath;
-        }
-        
-        my $List_S = `$CTAGS -x --c-kinds=fpvx $IgnoreTags \"$File\"`;
-        foreach my $Line (split(/\n/, $List_S))
+        if($UseTU)
         {
-            if($Line=~/\A(\w+)/) {
-                $SymbolToHeader{$1} = $HName;
+            my $TmpDir = $TMP_DIR."/tu";
+            if(not -d $TmpDir) {
+                mkpath($TmpDir);
+            }
+            
+            my $File_A = abs_path($File);
+            my $IncDir = getDirname($File_A);
+            my $IncDir_O = getDirname($IncDir);
+            
+            my $TmpInc = $TmpDir."/tmp-inc.h";
+            my $TmpContent = "";
+            if($IncludePreamble)
+            {
+                foreach my $P (split(/;/, $IncludePreamble)) {
+                    $TmpContent = "#include \"".$P."\"\n";
+                }
+            }
+            $TmpContent .= "#include \"$File_A\"\n";
+            writeFile($TmpInc, $TmpContent);
+            
+            my $Cmd = $GPP." -w -fpermissive -fdump-translation-unit -fkeep-inline-functions -c \"$TmpInc\"";
+            
+            if($IncludePaths)
+            {
+                foreach my $P (split(/;/, $IncludePaths))
+                {
+                    if($P!~/\A\//) {
+                        $P = $Path_A."/".$P;
+                    }
+                    
+                    $Cmd .= " -I\"".$P."\"";
+                }
+            }
+            
+            foreach my $P (@DefaultInc) {
+                $Cmd .= " -I\"$P\"";
+            }
+            $Cmd .= " -I\"$IncDir\" -I\"$IncDir_O\"";
+            
+            $Cmd .= " -o ./a.out >OUT 2>&1";
+            
+            chdir($TmpDir);
+            system($Cmd);
+            chdir($ORIG_DIR);
+            
+            my $TuDump = $TmpDir."/tmp-inc.h.001t.tu";
+            
+            if(not -e $TuDump) {
+                printMsg("ERROR", "failed to list symbols in the header \'$HName\'");
+            }
+            elsif($?) {
+                printMsg("ERROR", "some errors occured when compiling header \'$HName\'");
+            }
+            else
+            {
+                my (%Fdecl, %Tdecl, %Ident) = ();
+                foreach my $Line (split(/\n/, readFile($TuDump)))
+                {
+                    if(index($Line, "function_decl")!=-1
+                    or index($Line, "var_decl")!=-1)
+                    {
+                        if($Line=~/name: \@(\d+)/)
+                        {
+                            $Fdecl{$1} = 1;
+                        }
+                    }
+                    elsif($Line=~/\@(\d+)\s+identifier_node\s+strg:\s+(\w+)/)
+                    {
+                        $Ident{$1} = $2;
+                    }
+                    elsif($Is_C)
+                    {
+                        if(index($Line, "type_decl")!=-1)
+                        {
+                            if($Line=~/name: \@(\d+)/)
+                            {
+                                $Tdecl{$1} = 1;
+                            }
+                        }
+                    }
+                }
+                
+                foreach my $Id (keys(%Fdecl))
+                {
+                    if(my $Name = $Ident{$Id})
+                    {
+                        $SymbolToHeader{$Name} = $HName;
+                    }
+                }
+                
+                if($Is_C)
+                {
+                    foreach my $Id (keys(%Tdecl))
+                    {
+                        if(my $Name = $Ident{$Id})
+                        {
+                            $TypeToHeader{$Name} = $HName;
+                        }
+                    }
+                }
+                
+                unlink($TuDump);
             }
         }
-        
-        if($OBJ_LANG eq "C")
-        {
-            my $List_T = `$CTAGS -x --c-kinds=cgsu $IgnoreTags \"$File\"`;
-            foreach my $Line (split(/\n/, $List_T))
+        else
+        { # using Ctags
+            my $IgnoreTags = "";
+            
+            if(defined $IgnoreTagsPath) {
+                $IgnoreTags = "-I \@".$IgnoreTagsPath;
+            }
+            
+            my $List_S = `$CTAGS -x --c-kinds=fpvx $IgnoreTags \"$File\"`;
+            foreach my $Line (split(/\n/, $List_S))
             {
                 if($Line=~/\A(\w+)/) {
-                    $TypeToHeader{$1} = $HName;
+                    $SymbolToHeader{$1} = $HName;
+                }
+            }
+            
+            if($Is_C)
+            {
+                my $List_T = `$CTAGS -x --c-kinds=cgsu $IgnoreTags \"$File\"`;
+                foreach my $Line (split(/\n/, $List_T))
+                {
+                    if($Line=~/\A(\w+)/) {
+                        $TypeToHeader{$1} = $HName;
+                    }
                 }
             }
         }
     }
     
-    $PublicSymbols_Detected = 1;
+    if($CacheHeaders)
+    {
+        writeFile($PublicHeader_F, Dumper(\%PublicHeader));
+        writeFile($SymbolToHeader_F, Dumper(\%SymbolToHeader));
+        writeFile($TypeToHeader_F, Dumper(\%TypeToHeader));
+        writeFile($Path_F, $Path_A);
+    }
 }
 
 sub scenario()
@@ -5023,6 +5220,24 @@ sub scenario()
     
     if($SortDump) {
         $Data::Dumper::Sortkeys = \&dump_sorting;
+    }
+    
+    if($PublicHeadersPath)
+    {
+        if(not -e $PublicHeadersPath) {
+            exitStatus("Access_Error", "can't access \'$PublicHeadersPath\'");
+        }
+        
+        foreach my $P (split(/;/, $IncludePaths))
+        {
+            if($P!~/\A\//) {
+                $P = $PublicHeadersPath."/".$P;
+            }
+            
+            if(not -e $P) {
+                exitStatus("Access_Error", "can't access \'$P\'");
+            }
+        }
     }
     
     if($SymbolsListPath)
