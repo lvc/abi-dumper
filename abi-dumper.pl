@@ -1672,8 +1672,9 @@ sub read_Vtables($)
 {
     my $Path = $_[0];
     
-    my $Name = getFilename($Path);
     $Path = abs_path($Path);
+    
+    my $Dir = getDirname($Path);
     
     if(index($LIB_LANG, "C++")!=-1)
     {
@@ -1704,7 +1705,7 @@ sub read_Vtables($)
             $ExtraPath = $ExtraInfo."/v-tables";
         }
         
-        system("$VTABLE_DUMPER -mangled -demangled \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        system("LD_LIBRARY_PATH=\"$Dir\" $VTABLE_DUMPER -mangled -demangled \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
         
         my $Content = readFile($ExtraPath);
         foreach my $ClassInfo (split(/\n\n\n/, $Content))
