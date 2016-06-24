@@ -2267,8 +2267,7 @@ sub complete_ABI()
     
     foreach my $Tid (sort {int($a) <=> int($b)} keys(%TypeInfo))
     {
-        if(defined $TypeInfo{$Tid}
-        and $TypeInfo{$Tid}{"Type"} eq "Typedef")
+        if($TypeInfo{$Tid}{"Type"} eq "Typedef")
         {
             my $TN = $TypeInfo{$Tid}{"Name"};
             my $TL = $TypeInfo{$Tid}{"Line"};
@@ -2277,7 +2276,8 @@ sub complete_ABI()
             if(my $BTid = $TypeInfo{$Tid}{"BaseType"})
             {
                 if(defined $TypeInfo{$BTid}
-                and $TypeInfo{$BTid}{"Name"}=~/\Aanon\-(\w+)\-/)
+                and $TypeInfo{$BTid}{"Name"}=~/\Aanon\-(\w+)\-/
+                and $TypeInfo{$BTid}{"Type"} eq "Enum")
                 {
                     %{$TypeInfo{$Tid}} = %{$TypeInfo{$BTid}};
                     $TypeInfo{$Tid}{"Name"} = $1." ".$TN;
@@ -2296,7 +2296,24 @@ sub complete_ABI()
                     if($NS) {
                         $TypeInfo{$Tid}{"NameSpace"} = $NS;
                     }
-                    $Delete{$BTid} = 1;
+                    $Delete{$BTid} = $Tid;
+                }
+            }
+        }
+        elsif($TypeInfo{$Tid}{"Type"} eq "Pointer")
+        {
+            if(my $BTid = $TypeInfo{$Tid}{"BaseType"})
+            {
+                if(my $To = $Delete{$BTid})
+                {
+                    $TypeInfo{$Tid}{"BaseType"} = $To;
+                    $TypeInfo{$Tid}{"Name"} = $TypeInfo{$To}{"Name"}."*";
+                    
+                    my $Name = $TypeInfo{$Tid}{"Name"};
+                    my $Type = $TypeInfo{$Tid}{"Type"};
+                    
+                    $TName_Tid{$Type}{$Name} = $Tid;
+                    $TName_Tids{$Type}{$Name}{$Tid} = 1;
                 }
             }
         }
