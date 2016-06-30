@@ -66,7 +66,7 @@ $TargetVersion, $ExtraInfo, $FullDump, $AllTypes, $AllSymbols, $BinOnly,
 $SkipCxx, $Loud, $AddrToName, $DumpStatic, $Compare, $AltDebugInfo,
 $AddDirs, $VTDumperPath, $SymbolsListPath, $PublicHeadersPath,
 $IgnoreTagsPath, $KernelExport, $UseTU, $ReimplementStd,
-$IncludePreamble, $IncludePaths, $CacheHeaders);
+$IncludePreamble, $IncludePaths, $CacheHeaders, $MixedHeaders, $Debug);
 
 my $CmdName = getFilename($0);
 
@@ -127,7 +127,9 @@ GetOptions("h|help!" => \$Help,
   "public-headers=s" => \$PublicHeadersPath,
   "ignore-tags=s" => \$IgnoreTagsPath,
   "reimplement-std!" => \$ReimplementStd,
+  "mixed-headers!" => \$MixedHeaders,
   "kernel-export!" => \$KernelExport,
+  "debug!" => \$Debug,
 # extra options
   "use-tu-dump!" => \$UseTU,
   "include-preamble=s" => \$IncludePreamble,
@@ -246,10 +248,18 @@ GENERAL OPTIONS:
       -public-headers option and the library reimplements
       some standard symbols (e.g. malloc).
   
+  -mixed-headers
+      This option should be specified if you are using
+      -public-headers option and the names of public headers
+      intersect with the internal headers.
+  
   -kernel-export
       Dump symbols exported by the Linux kernel and modules, i.e.
       symbols declared in the ksymtab section of the object and
       system calls.
+  
+  -debug
+      Enable debug messages.
 
 EXTRA OPTIONS:
   -use-tu-dump
@@ -266,7 +276,9 @@ EXTRA OPTIONS:
   -include-paths DIRS
       Specify include directories (separated by semicolon)
       that should be passed to the compiler by -I option
-      in order to compile headers without errors.
+      in order to compile headers without errors. If this
+      option is not set then the tool will try to generate
+      include paths automatically.
   
   -cache-headers DIR
       Cache headers analysis results to reuse later.
@@ -2131,19 +2143,6 @@ sub read_ABI()
                     }
                 }
             }
-            
-            if(defined $PublicHeadersPath)
-            {
-                if(not $TypeInfo{$Tid}{"Header"})
-                {
-                    my $TName = $TypeInfo{$Tid}{"Name"};
-                    $TName=~s/\A(struct|class|union|enum) //g;
-                    
-                    if(defined $TypeToHeader{$TName}) {
-                        $TypeInfo{$Tid}{"Header"} = $TypeToHeader{$TName};
-                    }
-                }
-            }
         }
     }
     
@@ -2277,7 +2276,7 @@ sub complete_ABI()
             {
                 if(defined $TypeInfo{$BTid}
                 and $TypeInfo{$BTid}{"Name"}=~/\Aanon\-(\w+)\-/
-                and $TypeInfo{$BTid}{"Type"} eq "Enum")
+                and $TypeInfo{$BTid}{"Type"}=~/Enum|Struct|Union/)
                 {
                     %{$TypeInfo{$Tid}} = %{$TypeInfo{$BTid}};
                     $TypeInfo{$Tid}{"Name"} = $1." ".$TN;
@@ -2315,17 +2314,6 @@ sub complete_ABI()
                     $TName_Tid{$Type}{$Name} = $Tid;
                     $TName_Tids{$Type}{$Name}{$Tid} = 1;
                 }
-            }
-        }
-    }
-    
-    foreach my $Tid (sort {int($a) <=> int($b)} keys(%TypeInfo))
-    {
-        if(defined $PublicHeadersPath)
-        {
-            if(not selectPublicType($Tid))
-            {
-                $TypeInfo{$Tid}{"PrivateABI"} = 1;
             }
         }
     }
@@ -2496,6 +2484,35 @@ sub complete_ABI()
     }
 }
 
+sub warnPrivateType($$)
+{
+    my ($Name, $Note) = @_;
+    
+    if($Name=~/Private|Opaque/i)
+    { # _GstClockPrivate
+      # _Eo_Opaque
+        return;
+    }
+    
+    if($Name=~/(\A| )_/i)
+    { # _GstBufferList
+        return;
+    }
+    
+    if($Name=~/_\Z/i)
+    { # FT_RasterRec_
+        return;
+    }
+    
+    printMsg("WARNING", "Private data type \'".$Name."\' ($Note)");
+}
+
+sub warnPrivateSymbol($$)
+{
+    my ($Name, $Note) = @_;
+    printMsg("WARNING", "Private symbol \'".$Name."\' ($Note)");
+}
+
 sub selectPublicType($)
 {
     my $Tid = $_[0];
@@ -2507,24 +2524,49 @@ sub selectPublicType($)
     my $TName = $TypeInfo{$Tid}{"Name"};
     $TName=~s/\A(struct|class|union|enum) //g;
     
-    my $Header = $TypeInfo{$Tid}{"Header"};
+    my $Header = getFilename($TypeInfo{$Tid}{"Header"});
     
-    if(not defined $Header
-    or not defined $PublicHeader{getFilename($Header)})
+    if($OBJ_LANG eq "C++"
+    or index($TName, "anon-")==0) {
+        return ($Header and defined $PublicHeader{$Header});
+    }
+    
+    if($Header)
     {
-        if($OBJ_LANG eq "C")
+        if(not defined $PublicHeader{$Header})
         {
-            if(not defined $TypeToHeader{$TName})
-            {
+            if(not defined $TypeToHeader{$TName}) {
                 return 0;
             }
-            elsif(defined $Header
-            and $Header ne $TypeToHeader{$TName})
-            {
+            elsif($Header ne $TypeToHeader{$TName}) {
                 return 0;
             }
         }
-        else {
+        elsif($MixedHeaders)
+        {
+            if(not defined $TypeToHeader{$TName})
+            {
+                if(defined $Debug) {
+                    warnPrivateType($TypeInfo{$Tid}{"Name"}, "NOT_FOUND");
+                }
+                return 0;
+            }
+            elsif($Header ne $TypeToHeader{$TName})
+            {
+                if(defined $Debug) {
+                    warnPrivateType($TypeInfo{$Tid}{"Name"}, "OTHER_HEADER");
+                }
+                return 0;
+            }
+        }
+    }
+    else
+    {
+        if(not defined $TypeToHeader{$TName})
+        {
+            # if(defined $Debug) {
+            #     warnPrivateType($TypeInfo{$Tid}{"Name"}, "NO_HEADER");
+            # }
             return 0;
         }
     }
@@ -2536,17 +2578,20 @@ sub selectPublic($$)
 {
     my ($Symbol, $ID) = @_;
     
-    if(not defined $SymbolInfo{$ID}{"Header"}
-    or not defined $PublicHeader{getFilename($SymbolInfo{$ID}{"Header"})})
+    my $Header = getFilename($SymbolInfo{$ID}{"Header"});
+    
+    if($OBJ_LANG eq "C++") {
+        return ($Header and defined $PublicHeader{$Header});
+    }
+    
+    if($Header)
     {
-        if($OBJ_LANG eq "C")
+        if(not defined $PublicHeader{$Header})
         {
-            if(not defined $SymbolToHeader{$Symbol})
-            {
+            if(not defined $SymbolToHeader{$Symbol}) {
                 return 0;
             }
-            elsif(defined $SymbolInfo{$ID}{"Header"}
-            and $SymbolInfo{$ID}{"Header"} ne $SymbolToHeader{$Symbol}
+            elsif($Header ne $SymbolToHeader{$Symbol}
             and not defined $SymbolInfo{$ID}{"Alias"})
             {
                 if(not $ReimplementStd) {
@@ -2554,7 +2599,35 @@ sub selectPublic($$)
                 }
             }
         }
-        else {
+        elsif($MixedHeaders)
+        {
+            if(not defined $SymbolToHeader{$Symbol})
+            {
+                if(defined $Debug) {
+                    warnPrivateSymbol($Symbol, "NOT_FOUND");
+                }
+                return 0;
+            }
+            elsif($Header ne $SymbolToHeader{$Symbol}
+            and not defined $SymbolInfo{$ID}{"Alias"})
+            {
+                if(not $ReimplementStd)
+                {
+                    if(defined $Debug) {
+                        warnPrivateSymbol($Symbol, "OTHER_HEADER");
+                    }
+                    return 0;
+                }
+            }
+        }
+    }
+    else
+    {
+        if(not defined $SymbolToHeader{$Symbol})
+        {
+            # if(defined $Debug) {
+            #     warnPrivateSymbol($Symbol, "NO_HEADER");
+            # }
             return 0;
         }
     }
@@ -4976,7 +5049,7 @@ sub findFiles(@)
 sub isHeader($)
 {
     my $Path = $_[0];
-    return ($Path=~/\.(h|hh|hp|hxx|hpp|h\+\+|tcc)\Z/i);
+    return ($Path=~/\.(h|hh|hp|hxx|hpp|h\+\+|tcc|x|inl)\Z/i);
 }
 
 sub detectPublicSymbols($)
@@ -5083,8 +5156,14 @@ sub detectPublicSymbols($)
             my $TmpContent = "";
             if($IncludePreamble)
             {
-                foreach my $P (split(/;/, $IncludePreamble)) {
-                    $TmpContent = "#include \"".$P."\"\n";
+                foreach my $P (split(/;/, $IncludePreamble))
+                {
+                    if($P=~/\A\//) {
+                        $TmpContent = "#include \"".$P."\"\n";
+                    }
+                    else {
+                        $TmpContent = "#include <".$P.">\n";
+                    }
                 }
             }
             $TmpContent .= "#include \"$File_A\"\n";
@@ -5092,7 +5171,7 @@ sub detectPublicSymbols($)
             
             my $Cmd = $GPP." -w -fpermissive -fdump-translation-unit -fkeep-inline-functions -c \"$TmpInc\"";
             
-            if($IncludePaths)
+            if(defined $IncludePaths)
             {
                 foreach my $P (split(/;/, $IncludePaths))
                 {
@@ -5103,11 +5182,14 @@ sub detectPublicSymbols($)
                     $Cmd .= " -I\"".$P."\"";
                 }
             }
+            else
+            { # automatic
+                $Cmd .= " -I\"$IncDir\" -I\"$IncDir_O\"";
+            }
             
             foreach my $P (@DefaultInc) {
                 $Cmd .= " -I\"$P\"";
             }
-            $Cmd .= " -I\"$IncDir\" -I\"$IncDir_O\"";
             
             $Cmd .= " -o ./a.out >OUT 2>&1";
             
@@ -5125,15 +5207,27 @@ sub detectPublicSymbols($)
             }
             else
             {
-                my (%Fdecl, %Tdecl, %Ident) = ();
-                foreach my $Line (split(/\n/, readFile($TuDump)))
+                my (%Fdecl, %Tdecl, %Tname, %Ident, %NotDecl) = ();
+                my $Content = readFile($TuDump);
+                $Content=~s/\n[ ]+/ /g;
+                
+                my @Lines = split(/\n/, $Content);
+                foreach my $N (0 .. $#Lines)
                 {
+                    my $Line = $Lines[$N];
                     if(index($Line, "function_decl")!=-1
                     or index($Line, "var_decl")!=-1)
                     {
                         if($Line=~/name: \@(\d+)/)
                         {
-                            $Fdecl{$1} = 1;
+                            my $Id = $1;
+                            
+                            if($Line=~/srcp: ([^:]+)\:\d/)
+                            {
+                                if(defined $PublicHeader{$1}) {
+                                    $Fdecl{$Id} = $1;
+                                }
+                            }
                         }
                     }
                     elsif($Line=~/\@(\d+)\s+identifier_node\s+strg:\s+(\w+)/)
@@ -5144,9 +5238,50 @@ sub detectPublicSymbols($)
                     {
                         if(index($Line, "type_decl")!=-1)
                         {
+                            if($Line=~/\A\@(\d+)/)
+                            {
+                                my $Id = $1;
+                                if($Line=~/name: \@(\d+)/)
+                                {
+                                    my $NId = $1;
+                                    
+                                    if($Line=~/srcp: ([^:]+)\:\d/)
+                                    {
+                                        if(defined $PublicHeader{$1})
+                                        {
+                                            $Tdecl{$Id} = $1;
+                                            $Tname{$Id} = $NId;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        elsif(index($Line, "record_type")!=-1
+                        or index($Line, "union_type")!=-1)
+                        {
+                            if($Line!~/ flds:/)
+                            {
+                                if($Line=~/name: \@(\d+)/)
+                                {
+                                    $NotDecl{$1} = 1;
+                                }
+                            }
+                        }
+                        elsif(index($Line, "enumeral_type")!=-1)
+                        {
+                            if($Line!~/ csts:/)
+                            {
+                                if($Line=~/name: \@(\d+)/)
+                                {
+                                    $NotDecl{$1} = 1;
+                                }
+                            }
+                        }
+                        elsif(index($Line, "integer_type")!=-1)
+                        {
                             if($Line=~/name: \@(\d+)/)
                             {
-                                $Tdecl{$1} = 1;
+                                $NotDecl{$1} = 1;
                             }
                         }
                     }
@@ -5154,9 +5289,8 @@ sub detectPublicSymbols($)
                 
                 foreach my $Id (keys(%Fdecl))
                 {
-                    if(my $Name = $Ident{$Id})
-                    {
-                        $SymbolToHeader{$Name} = $HName;
+                    if(my $Name = $Ident{$Id}) {
+                        $SymbolToHeader{$Name} = $Fdecl{$Id};
                     }
                 }
                 
@@ -5164,9 +5298,12 @@ sub detectPublicSymbols($)
                 {
                     foreach my $Id (keys(%Tdecl))
                     {
-                        if(my $Name = $Ident{$Id})
-                        {
-                            $TypeToHeader{$Name} = $HName;
+                        if(defined $NotDecl{$Id}) {
+                            next;
+                        }
+                        
+                        if(my $Name = $Ident{$Tname{$Id}}) {
+                            $TypeToHeader{$Name} = $Tdecl{$Id};
                         }
                     }
                 }
@@ -5192,11 +5329,16 @@ sub detectPublicSymbols($)
             
             if($Is_C)
             {
-                my $List_T = `$CTAGS -x --c-kinds=cgsu $IgnoreTags \"$File\"`;
+                my $List_T = `$CTAGS -x --c-kinds=gstu --language-force=c $IgnoreTags \"$File\"`;
                 foreach my $Line (split(/\n/, $List_T))
                 {
-                    if($Line=~/\A(\w+)/) {
-                        $TypeToHeader{$1} = $HName;
+                    if($Line=~/\A(\w+)/)
+                    {
+                        my $N = $1;
+                        
+                        if($Line!~/\b$N\s+$N\b/) {
+                            $TypeToHeader{$1} = $HName;
+                        }
                     }
                 }
             }
@@ -5452,6 +5594,30 @@ sub scenario()
     
     complete_ABI();
     remove_Unused();
+    
+    if(defined $PublicHeadersPath)
+    {
+        foreach my $Tid (sort {lc($TypeInfo{$a}{"Name"}) cmp lc($TypeInfo{$b}{"Name"})} keys(%TypeInfo))
+        {
+            if(not $TypeInfo{$Tid}{"Header"})
+            {
+                if($TypeInfo{$Tid}{"Type"}=~/Struct|Union|Enum|Typedef/)
+                {
+                    my $TName = $TypeInfo{$Tid}{"Name"};
+                    $TName=~s/\A(struct|class|union|enum) //g;
+                    
+                    if(defined $TypeToHeader{$TName}) {
+                        $TypeInfo{$Tid}{"Header"} = $TypeToHeader{$TName};
+                    }
+                }
+            }
+            
+            if(not selectPublicType($Tid))
+            {
+                $TypeInfo{$Tid}{"PrivateABI"} = 1;
+            }
+        }
+    }
     
     %Mangled_ID = ();
     %Checked_Spec = ();
