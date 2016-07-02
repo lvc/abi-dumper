@@ -2279,7 +2279,7 @@ sub complete_ABI()
                 and $TypeInfo{$BTid}{"Type"}=~/Enum|Struct|Union/)
                 {
                     %{$TypeInfo{$Tid}} = %{$TypeInfo{$BTid}};
-                    $TypeInfo{$Tid}{"Name"} = $1." ".$TN;
+                    $TypeInfo{$Tid}{"Name"} = lc($TypeInfo{$BTid}{"Type"})." ".$TN;
                     $TypeInfo{$Tid}{"Line"} = $TL;
                     
                     my $Name = $TypeInfo{$Tid}{"Name"};
