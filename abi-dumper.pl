@@ -3076,6 +3076,7 @@ sub getTypeInfo($)
             }
         }
     }
+    
     if($RealType eq "Class") {
         $TInfo{"Copied"} = 1; # will be changed in getSymbolInfo()
     }
@@ -3346,27 +3347,25 @@ sub getTypeInfo($)
         }
     }
     
-    if($TInfo{"Type"} eq "Pointer")
+    if(not $TInfo{"BaseType"})
     {
-        if(not $TInfo{"BaseType"})
+        if($TInfo{"Type"} eq "Pointer")
         {
             $TInfo{"Name"} = "void*";
             $TInfo{"BaseType"} = "1";
         }
-    }
-    if($TInfo{"Type"} eq "Const")
-    {
-        if(not $TInfo{"BaseType"})
+        elsif($TInfo{"Type"} eq "Const")
         {
             $TInfo{"Name"} = "const void";
             $TInfo{"BaseType"} = "1";
         }
-    }
-    if($TInfo{"Type"} eq "Volatile")
-    {
-        if(not $TInfo{"BaseType"})
+        elsif($TInfo{"Type"} eq "Volatile")
         {
             $TInfo{"Name"} = "volatile void";
+            $TInfo{"BaseType"} = "1";
+        }
+        elsif($TInfo{"Type"} eq "Typedef")
+        {
             $TInfo{"BaseType"} = "1";
         }
     }

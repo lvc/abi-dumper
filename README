@@ -33,10 +33,10 @@ ABI CHECK:
 
 FILTER PUBLIC ABI:
   abi-dumper libTest.so -public-headers PATH
-  PATH — path to install tree of a library
+  PATH — path to the install tree of a library
 
 COMPATIBILITY:
-  ABI Compliance Checker >= 1.99.8 (https://github.com/lvc/abi-compliance-checker)
+  ABI Compliance Checker >= 1.99.14 (https://github.com/lvc/abi-compliance-checker)
 
 ADV. USAGE:
   For advanced usage, see output of --help option.
