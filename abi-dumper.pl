@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.99.16
+# ABI Dumper 0.99.17
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013-2016 Andrey Ponomarenko's ABI Laboratory
@@ -46,7 +46,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.99.16";
+my $TOOL_VERSION = "0.99.17";
 my $ABI_DUMP_VERSION = "3.2";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -66,7 +66,8 @@ $TargetVersion, $ExtraInfo, $FullDump, $AllTypes, $AllSymbols, $BinOnly,
 $SkipCxx, $Loud, $AddrToName, $DumpStatic, $Compare, $AltDebugInfo,
 $AddDirs, $VTDumperPath, $SymbolsListPath, $PublicHeadersPath,
 $IgnoreTagsPath, $KernelExport, $UseTU, $ReimplementStd,
-$IncludePreamble, $IncludePaths, $CacheHeaders, $MixedHeaders, $Debug);
+$IncludePreamble, $IncludePaths, $CacheHeaders, $MixedHeaders, $Debug,
+$SearchDirDebuginfo);
 
 my $CmdName = getFilename($0);
 
@@ -129,6 +130,7 @@ GetOptions("h|help!" => \$Help,
   "reimplement-std!" => \$ReimplementStd,
   "mixed-headers!" => \$MixedHeaders,
   "kernel-export!" => \$KernelExport,
+  "search-debuginfo=s" => \$SearchDirDebuginfo,
   "debug!" => \$Debug,
 # extra options
   "use-tu-dump!" => \$UseTU,
@@ -257,6 +259,10 @@ GENERAL OPTIONS:
       Dump symbols exported by the Linux kernel and modules, i.e.
       symbols declared in the ksymtab section of the object and
       system calls.
+  
+  -search-debuginfo DIR
+      Search for debug-info files referenced from gnu_debuglink
+      section of the object in DIR.
   
   -debug
       Enable debug messages.
@@ -398,6 +404,8 @@ my $SYS_GCCV;
 my $SYS_COMP;
 my $LIB_LANG;
 my $OBJ_LANG;
+
+my $IncompatibleOpt = undef;
 
 # Errors
 my $InvalidDebugLoc;
@@ -719,14 +727,11 @@ sub read_Symbols($)
                 $Symbol_Value{$Symbol} = $Value;
                 $Value_Symbol{$Value}{$Symbol} = 1;
                 
-                if(defined $PublicHeadersPath)
+                if(not defined $OBJ_LANG)
                 {
-                    if(not defined $OBJ_LANG)
+                    if(index($Symbol, "_Z")==0)
                     {
-                        if(index($Symbol, "_Z")==0)
-                        {
-                            $OBJ_LANG = "C++";
-                        }
+                        $OBJ_LANG = "C++";
                     }
                 }
             }
@@ -808,12 +813,9 @@ sub read_Symbols($)
         }
     }
     
-    if(defined $PublicHeadersPath)
+    if(not defined $OBJ_LANG)
     {
-        if(not defined $OBJ_LANG)
-        {
-            $OBJ_LANG = "C";
-        }
+        $OBJ_LANG = "C";
     }
 }
 
@@ -965,17 +967,61 @@ sub read_DWARF_Info($)
         if(my $DebugFile = getDebugFile($Path, "gnu_debuglink"))
         {
             my $DPath = $DebugFile;
+            my $DName = getFilename($DPath);
             
             if(my $DDir = getDirname($Path))
             {
                 $DPath = $DDir."/".$DPath;
             }
             
-            printMsg("INFO", "Reading $DPath (gnu_debuglink)");
+            my $Found = undef;
+            if(defined $SearchDirDebuginfo)
+            {
+                my @Files = findFiles($SearchDirDebuginfo, "f");
+                
+                foreach my $F (@Files)
+                {
+                    if(getFilename($F) eq $DName)
+                    {
+                        $Found = $F;
+                        last;
+                    }
+                }
+            }
             
-            return read_DWARF_Info($DPath);
+            if($Found)
+            {
+                $DPath = $Found;
+                printMsg("INFO", "Found debuginfo $DName (gnu_debuglink)");
+            }
+            
+            if($DPath ne $Path)
+            {
+                if(-e $DPath)
+                {
+                    printMsg("INFO", "Reading debuginfo $DName (gnu_debuglink)");
+                    return read_DWARF_Info($DPath);
+                }
+                else {
+                    printMsg("WARNING", "Missed debuginfo $DName (gnu_debuglink)");
+                }
+            }
+            else {
+                return 0;
+            }
         }
         return 0;
+    }
+    else
+    {
+        if($Sect=~/\.gnu_debugaltlink/)
+        {
+            if(my $AltObj = getDebugAltLink($Path))
+            {
+                $AltDebugInfo = $AltObj;
+                read_Alt_Info($AltObj);
+            }
+        }
     }
     
     printMsg("INFO", "Reading debug-info");
@@ -1486,8 +1532,23 @@ sub read_DWARF_Dump($$)
                                     $SYS_GCCV = $1.$2;
                                 }
                                 
-                                if($Val=~/(\A| )(\-O[0-3])( |\Z)/) {
-                                    printMsg("WARNING", "incompatible build option detected: $2");
+                                my %Opts = ();
+                                while($Val=~s/(\A| )(\-O([0-3]|g))( |\Z)/ /) {
+                                    $Opts{keys(%Opts)} = $2;
+                                }
+                                
+                                if(keys(%Opts))
+                                {
+                                    if($Opts{keys(%Opts)-1} ne "-Og")
+                                    {
+                                        printMsg("WARNING", "incompatible build option detected: ".$Opts{keys(%Opts)-1}." (required -Og for better analysis)");
+                                        $IncompatibleOpt = 1;
+                                    }
+                                }
+                                else
+                                {
+                                    printMsg("WARNING", "the object should be compiled with -Og option for better analysis");
+                                    $IncompatibleOpt = 1;
                                 }
                             }
                             else {
@@ -1674,6 +1735,10 @@ sub read_DWARF_Dump($$)
         }
     }
     
+    if(not defined $ID) {
+        printMsg("ERROR", "the debuginfo looks empty or corrupted");
+    }
+    
     # read the last compile unit
     # or all units if debug_info is compressed
     complete_Dump($Primary);
@@ -1688,7 +1753,8 @@ sub read_Vtables($)
     
     my $Dir = getDirname($Path);
     
-    if(index($LIB_LANG, "C++")!=-1)
+    if(index($LIB_LANG, "C++")!=-1
+    or $OBJ_LANG eq "C++")
     {
         printMsg("INFO", "Reading v-tables");
         
@@ -1788,6 +1854,12 @@ sub dump_ABI()
     
     if(defined $PublicHeadersPath) {
         $ABI{"PublicABI"} = "1";
+    }
+    
+    if(defined $IncompatibleOpt)
+    {
+        $ABI{"MissedOffsets"} = "1";
+        $ABI{"MissedRegs"} = "1";
     }
     
     my $ABI_DUMP = Dumper(\%ABI);
@@ -3862,7 +3934,9 @@ sub getSymbolInfo($)
         {
             if($SInfo{"ShortName"})
             {
-                $SInfo{"Alias"} = $SInfo{"ShortName"};
+                if(index($SInfo{"ShortName"}, ".")==-1) {
+                    $SInfo{"Alias"} = $SInfo{"ShortName"};
+                }
                 $SInfo{"ShortName"} = $SInfo{"MnglName"};
             }
             
@@ -4211,7 +4285,8 @@ sub getSymbolInfo($)
         
         my %PInfo = %{$DWARF_Info{$ParamId}};
         
-        if(defined $Offset) {
+        if(defined $Offset
+        and not defined $IncompatibleOpt) {
             $SInfo{"Param"}{$Pos}{"offset"} = $Offset;
         }
         
@@ -4235,7 +4310,8 @@ sub getSymbolInfo($)
             $SInfo{"Param"}{$Pos}{"name"} = "p".($PPos+1);
         }
         
-        if(defined $Reg)
+        if(defined $Reg
+        and not defined $IncompatibleOpt)
         {
             $SInfo{"Reg"}{$Pos} = $Reg;
         }
@@ -5353,6 +5429,39 @@ sub detectPublicSymbols($)
     }
 }
 
+sub getDebugAltLink($)
+{
+    my $Obj = $_[0];
+    
+    my $AltDebugFile = getDebugFile($Obj, "gnu_debugaltlink");
+    
+    if(not $AltDebugFile) {
+        return undef;
+    }
+    
+    my $Dir = getDirname($Obj);
+    
+    my $AltObj_R = $AltDebugFile;
+    if($Dir and $Dir ne ".") {
+        $AltObj_R = $Dir."/".$AltObj_R;
+    }
+    
+    my $AltObj = $AltObj_R;
+    
+    while($AltObj=~s&/[^/]+/\.\./&/&){};
+    
+    if(-e $AltObj)
+    {
+        printMsg("INFO", "Set alternate debug-info file to \'$AltObj\' (use -alt option to change it)");
+        return $AltObj;
+    }
+    else {
+        printMsg("WARNING", "can't access \'$AltObj_R\'");
+    }
+    
+    return undef;
+}
+
 sub scenario()
 {
     if($Help)
@@ -5379,6 +5488,13 @@ sub scenario()
     
     if($SortDump) {
         $Data::Dumper::Sortkeys = \&dump_sorting;
+    }
+    
+    if($SearchDirDebuginfo)
+    {
+        if(not -d $SearchDirDebuginfo) {
+            exitStatus("Access_Error", "can't access directory \'$SearchDirDebuginfo\'");
+        }
     }
     
     if($PublicHeadersPath)
@@ -5506,45 +5622,6 @@ sub scenario()
         if(not -e $AltDebugInfo) {
             exitStatus("Access_Error", "can't access \'$AltDebugInfo\'");
         }
-    }
-    else
-    {
-        if(not check_Cmd($EU_READELF)) {
-            exitStatus("Not_Found", "can't find \"$EU_READELF\" command");
-        }
-        foreach my $Obj (@ARGV)
-        {
-            my $Sect = `$EU_READELF_L -S \"$Obj\" 2>\"$TMP_DIR/error\"`;
-    
-            if($Sect=~/\.z?debug_info/)
-            {
-                if($Sect=~/\.gnu_debugaltlink/)
-                {
-                    if(my $AltDebugFile = getDebugFile($Obj, "gnu_debugaltlink"))
-                    {
-                        my $AltObj_R = getDirname($Obj)."/".$AltDebugFile;
-                        
-                        my $AltObj = $AltObj_R;
-                        
-                        while($AltObj=~s&/[^/]+/\.\./&/&){};
-                        
-                        if(-e $AltObj)
-                        {
-                            printMsg("INFO", "Set alternate debug-info file to \'$AltObj\' (use -alt option to change it)");
-                            $AltDebugInfo = $AltObj;
-                        }
-                        else
-                        {
-                            printMsg("WARNING", "can't access \'$AltObj_R\'");
-                        }
-                    }
-                }
-                last;
-            }
-        }
-    }
-    
-    if($AltDebugInfo) {
         read_Alt_Info($AltDebugInfo);
     }
     
