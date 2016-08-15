@@ -63,7 +63,7 @@ my $GPP = "g++";
 
 my ($Help, $ShowVersion, $DumpVersion, $OutputDump, $SortDump, $StdOut,
 $TargetVersion, $ExtraInfo, $FullDump, $AllTypes, $AllSymbols, $BinOnly,
-$SkipCxx, $Loud, $AddrToName, $DumpStatic, $Compare, $AltDebugInfo,
+$SkipCxx, $Loud, $AddrToName, $DumpStatic, $Compare, $AltDebugInfoOpt,
 $AddDirs, $VTDumperPath, $SymbolsListPath, $PublicHeadersPath,
 $IgnoreTagsPath, $KernelExport, $UseTU, $ReimplementStd,
 $IncludePreamble, $IncludePaths, $CacheHeaders, $MixedHeaders, $Debug,
@@ -122,7 +122,7 @@ GetOptions("h|help!" => \$Help,
   "all!" => \$FullDump,
   "dump-static!" => \$DumpStatic,
   "compare!" => \$Compare,
-  "alt=s" => \$AltDebugInfo,
+  "alt=s" => \$AltDebugInfoOpt,
   "dir!" => \$AddDirs,
   "vt-dumper=s" => \$VTDumperPath,
   "public-headers=s" => \$PublicHeadersPath,
@@ -1003,7 +1003,7 @@ sub read_DWARF_Info($)
                     return read_DWARF_Info($DPath);
                 }
                 else {
-                    printMsg("WARNING", "Missed debuginfo $DName (gnu_debuglink)");
+                    printMsg("WARNING", "missed debuginfo $DName (gnu_debuglink)");
                 }
             }
             else {
@@ -1012,7 +1012,7 @@ sub read_DWARF_Info($)
         }
         return 0;
     }
-    else
+    elsif(not defined $AltDebugInfoOpt)
     {
         if($Sect=~/\.gnu_debugaltlink/)
         {
@@ -1020,6 +1020,9 @@ sub read_DWARF_Info($)
             {
                 $AltDebugInfo = $AltObj;
                 read_Alt_Info($AltObj);
+            }
+            else {
+                exitStatus("Error", "can't read gnu_debugaltlink");
             }
         }
     }
@@ -5617,12 +5620,13 @@ sub scenario()
         }
     }
     
-    if($AltDebugInfo)
+    if($AltDebugInfoOpt)
     {
-        if(not -e $AltDebugInfo) {
-            exitStatus("Access_Error", "can't access \'$AltDebugInfo\'");
+        if(not -e $AltDebugInfoOpt) {
+            exitStatus("Access_Error", "can't access \'$AltDebugInfoOpt\'");
         }
-        read_Alt_Info($AltDebugInfo);
+        $AltDebugInfo = $AltDebugInfoOpt;
+        read_Alt_Info($AltDebugInfoOpt);
     }
     
     if($ExtraInfo)
