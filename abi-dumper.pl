@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.99.17
+# ABI Dumper 0.99.18
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013-2016 Andrey Ponomarenko's ABI Laboratory
@@ -46,8 +46,8 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.99.17";
-my $ABI_DUMP_VERSION = "3.2";
+my $TOOL_VERSION = "0.99.18";
+my $ABI_DUMP_VERSION = "3.3";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
 
@@ -127,7 +127,6 @@ GetOptions("h|help!" => \$Help,
   "vt-dumper=s" => \$VTDumperPath,
   "public-headers=s" => \$PublicHeadersPath,
   "ignore-tags=s" => \$IgnoreTagsPath,
-  "reimplement-std!" => \$ReimplementStd,
   "mixed-headers!" => \$MixedHeaders,
   "kernel-export!" => \$KernelExport,
   "search-debuginfo=s" => \$SearchDirDebuginfo,
@@ -138,7 +137,9 @@ GetOptions("h|help!" => \$Help,
   "include-paths=s" => \$IncludePaths,
   "cache-headers=s" => \$CacheHeaders,
 # internal options
-  "addr2name!" => \$AddrToName
+  "addr2name!" => \$AddrToName,
+# obsolete
+  "reimplement-std!" => \$ReimplementStd
 ) or ERR_MESSAGE();
 
 sub ERR_MESSAGE()
@@ -246,9 +247,7 @@ GENERAL OPTIONS:
       symbols in header files.
   
   -reimplement-std
-      This option should be specified if you are using
-      -public-headers option and the library reimplements
-      some standard symbols (e.g. malloc).
+      Do nothing.
   
   -mixed-headers
       This option should be specified if you are using
@@ -2667,11 +2666,8 @@ sub selectPublic($$)
                 return 0;
             }
             elsif($Header ne $SymbolToHeader{$Symbol}
-            and not defined $SymbolInfo{$ID}{"Alias"})
-            {
-                if(not $ReimplementStd) {
-                    return 0;
-                }
+            and not defined $SymbolInfo{$ID}{"Alias"}) {
+                return 0;
             }
         }
         elsif($MixedHeaders)
@@ -2686,13 +2682,10 @@ sub selectPublic($$)
             elsif($Header ne $SymbolToHeader{$Symbol}
             and not defined $SymbolInfo{$ID}{"Alias"})
             {
-                if(not $ReimplementStd)
-                {
-                    if(defined $Debug) {
-                        warnPrivateSymbol($Symbol, "OTHER_HEADER");
-                    }
-                    return 0;
+                if(defined $Debug) {
+                    warnPrivateSymbol($Symbol, "OTHER_HEADER");
                 }
+                return 0;
             }
         }
     }
@@ -4221,7 +4214,7 @@ sub getSymbolInfo($)
         }
     }
     
-    if(not $SInfo{"Header"})
+    if(not $SInfo{"Header"} or $SInfo{"External"})
     {
         if(defined $SymbolToHeader{$MnglName}) {
             $SInfo{"Header"} = $SymbolToHeader{$MnglName};
@@ -4231,7 +4224,8 @@ sub getSymbolInfo($)
             $SInfo{"Header"} = $SymbolToHeader{$SInfo{"ShortName"}};
         }
     }
-    elsif($SInfo{"Alias"})
+    
+    if($SInfo{"Alias"})
     {
         if(defined $SymbolToHeader{$SInfo{"Alias"}}
         and $SymbolToHeader{$SInfo{"Alias"}} ne $SInfo{"Header"})
@@ -5215,7 +5209,7 @@ sub detectPublicSymbols($)
     
     my $Is_C = ($OBJ_LANG eq "C");
     
-    foreach my $File (@Headers)
+    foreach my $File (sort {lc($a) cmp lc($b)} @Headers)
     {
         my $HName = getFilename($File);
         
@@ -5415,7 +5409,7 @@ sub detectPublicSymbols($)
                         my $N = $1;
                         
                         if($Line!~/\b$N\s+$N\b/) {
-                            $TypeToHeader{$1} = $HName;
+                            $TypeToHeader{$N} = $HName;
                         }
                     }
                 }
