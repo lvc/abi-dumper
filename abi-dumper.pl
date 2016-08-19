@@ -67,7 +67,7 @@ $SkipCxx, $Loud, $AddrToName, $DumpStatic, $Compare, $AltDebugInfoOpt,
 $AddDirs, $VTDumperPath, $SymbolsListPath, $PublicHeadersPath,
 $IgnoreTagsPath, $KernelExport, $UseTU, $ReimplementStd,
 $IncludePreamble, $IncludePaths, $CacheHeaders, $MixedHeaders, $Debug,
-$SearchDirDebuginfo);
+$SearchDirDebuginfo, $KeepRegsAndOffsets);
 
 my $CmdName = getFilename($0);
 
@@ -130,6 +130,7 @@ GetOptions("h|help!" => \$Help,
   "mixed-headers!" => \$MixedHeaders,
   "kernel-export!" => \$KernelExport,
   "search-debuginfo=s" => \$SearchDirDebuginfo,
+  "keep-registers-and-offsets!" => \$KeepRegsAndOffsets,
   "debug!" => \$Debug,
 # extra options
   "use-tu-dump!" => \$UseTU,
@@ -263,6 +264,10 @@ GENERAL OPTIONS:
       Search for debug-info files referenced from gnu_debuglink
       section of the object in DIR.
   
+  -keep-registers-and-offsets
+      Dump used registers and stack offsets even if incompatible
+      build options detected.
+  
   -debug
       Enable debug messages.
 
@@ -301,6 +306,7 @@ my %DWARF_Info;
 # Alternate
 my %ImportedUnit;
 my %ImportedDecl;
+my $AltDebugInfo = undef;
 
 # Dump
 my %TypeUnit;
@@ -381,7 +387,7 @@ my $SRC_EXT = "c|cpp|cxx|c\\+\\+";
 
 # Other
 my %NestedNameSpaces;
-my $TargetName;
+my $TargetName = undef;
 my %HeadersInfo;
 my %SourcesInfo;
 my %SymVer;
@@ -1534,23 +1540,26 @@ sub read_DWARF_Dump($$)
                                     $SYS_GCCV = $1.$2;
                                 }
                                 
-                                my %Opts = ();
-                                while($Val=~s/(\A| )(\-O([0-3]|g))( |\Z)/ /) {
-                                    $Opts{keys(%Opts)} = $2;
-                                }
-                                
-                                if(keys(%Opts))
+                                if(not defined $KeepRegsAndOffsets)
                                 {
-                                    if($Opts{keys(%Opts)-1} ne "-Og")
+                                    my %Opts = ();
+                                    while($Val=~s/(\A| )(\-O([0-3]|g))( |\Z)/ /) {
+                                        $Opts{keys(%Opts)} = $2;
+                                    }
+                                    
+                                    if(keys(%Opts))
                                     {
-                                        printMsg("WARNING", "incompatible build option detected: ".$Opts{keys(%Opts)-1}." (required -Og for better analysis)");
+                                        if($Opts{keys(%Opts)-1} ne "-Og")
+                                        {
+                                            printMsg("WARNING", "incompatible build option detected: ".$Opts{keys(%Opts)-1}." (required -Og for better analysis)");
+                                            $IncompatibleOpt = 1;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        printMsg("WARNING", "the object should be compiled with -Og option for better analysis");
                                         $IncompatibleOpt = 1;
                                     }
-                                }
-                                else
-                                {
-                                    printMsg("WARNING", "the object should be compiled with -Og option for better analysis");
-                                    $IncompatibleOpt = 1;
                                 }
                             }
                             else {
@@ -2612,9 +2621,6 @@ sub selectPublicType($)
             if(not defined $TypeToHeader{$TName}) {
                 return 0;
             }
-            elsif($Header ne $TypeToHeader{$TName}) {
-                return 0;
-            }
         }
         elsif($MixedHeaders)
         {
@@ -2622,13 +2628,6 @@ sub selectPublicType($)
             {
                 if(defined $Debug) {
                     warnPrivateType($TypeInfo{$Tid}{"Name"}, "NOT_FOUND");
-                }
-                return 0;
-            }
-            elsif($Header ne $TypeToHeader{$TName})
-            {
-                if(defined $Debug) {
-                    warnPrivateType($TypeInfo{$Tid}{"Name"}, "OTHER_HEADER");
                 }
                 return 0;
             }
@@ -2665,10 +2664,6 @@ sub selectPublic($$)
             if(not defined $SymbolToHeader{$Symbol}) {
                 return 0;
             }
-            elsif($Header ne $SymbolToHeader{$Symbol}
-            and not defined $SymbolInfo{$ID}{"Alias"}) {
-                return 0;
-            }
         }
         elsif($MixedHeaders)
         {
@@ -2676,14 +2671,6 @@ sub selectPublic($$)
             {
                 if(defined $Debug) {
                     warnPrivateSymbol($Symbol, "NOT_FOUND");
-                }
-                return 0;
-            }
-            elsif($Header ne $SymbolToHeader{$Symbol}
-            and not defined $SymbolInfo{$ID}{"Alias"})
-            {
-                if(defined $Debug) {
-                    warnPrivateSymbol($Symbol, "OTHER_HEADER");
                 }
                 return 0;
             }
@@ -4214,23 +4201,22 @@ sub getSymbolInfo($)
         }
     }
     
-    if(not $SInfo{"Header"} or $SInfo{"External"})
+    if(not $SInfo{"Header"}
+    or ($SInfo{"External"} and not defined $PublicHeader{$SInfo{"Header"}}))
     {
-        if(defined $SymbolToHeader{$MnglName}) {
-            $SInfo{"Header"} = $SymbolToHeader{$MnglName};
+        if($SInfo{"MnglName"} and defined $SymbolToHeader{$SInfo{"MnglName"}}) {
+            $SInfo{"Header"} = chooseHeader($SInfo{"MnglName"}, $SInfo{"Source"});
         }
         elsif(not $SInfo{"Class"}
         and defined $SymbolToHeader{$SInfo{"ShortName"}}) {
-            $SInfo{"Header"} = $SymbolToHeader{$SInfo{"ShortName"}};
+            $SInfo{"Header"} = chooseHeader($SInfo{"ShortName"}, $SInfo{"Source"});
         }
     }
     
     if($SInfo{"Alias"})
     {
-        if(defined $SymbolToHeader{$SInfo{"Alias"}}
-        and $SymbolToHeader{$SInfo{"Alias"}} ne $SInfo{"Header"})
-        { # TODO: review this case
-            $SInfo{"Header"} = $SymbolToHeader{$SInfo{"Alias"}};
+        if(defined $SymbolToHeader{$SInfo{"Alias"}}) {
+            $SInfo{"Header"} = chooseHeader($SInfo{"Alias"}, $SInfo{"Source"});
         }
     }
     
@@ -4382,6 +4368,29 @@ sub getSymbolInfo($)
     if($ID>$GLOBAL_ID) {
         $GLOBAL_ID = $ID;
     }
+}
+
+sub chooseHeader($$)
+{
+    my ($Symbol, $Source) = @_;
+    
+    my @Headers = keys(%{$SymbolToHeader{$Symbol}});
+    
+    if($#Headers==0) {
+        return $Headers[0];
+    }
+    
+    $Source=~s/\.\w+\Z//g;
+    foreach my $Header (@Headers)
+    {
+        if($Header=~/\A\Q$Source\E(|\.[\w\+]+)\Z/) {
+            return $Header;
+        }
+    }
+    
+    @Headers = sort {length($a)<=>length($b)} sort {lc($a) cmp lc($b)} @Headers;
+    
+    return $Headers[0];
 }
 
 sub getTypeIdByName($$)
@@ -5098,8 +5107,8 @@ sub getDebugFile($$)
     my ($Obj, $Header) = @_;
     
     my $Str = `$EU_READELF_L --strings=.$Header \"$Obj\" 2>\"$TMP_DIR/error\"`;
-    if($Str=~/0\]\s*(.+)/) {
-        return $1;
+    if($Str=~/(\s|\[)0\]\s*(.+)/) {
+        return $2;
     }
     
     return undef;
@@ -5209,7 +5218,7 @@ sub detectPublicSymbols($)
     
     my $Is_C = ($OBJ_LANG eq "C");
     
-    foreach my $File (sort {lc($a) cmp lc($b)} @Headers)
+    foreach my $File (sort {length($b)<=>length($a)} sort {lc($b) cmp lc($a)} @Headers)
     {
         my $HName = getFilename($File);
         
@@ -5221,6 +5230,7 @@ sub detectPublicSymbols($)
             }
             
             my $File_A = abs_path($File);
+            
             my $IncDir = getDirname($File_A);
             my $IncDir_O = getDirname($IncDir);
             
@@ -5271,85 +5281,68 @@ sub detectPublicSymbols($)
             
             my $TuDump = $TmpDir."/tmp-inc.h.001t.tu";
             
-            if(not -e $TuDump) {
+            if(not -e $TuDump)
+            {
                 printMsg("ERROR", "failed to list symbols in the header \'$HName\'");
+                next;
             }
             elsif($?) {
                 printMsg("ERROR", "some errors occured when compiling header \'$HName\'");
             }
-            else
+            
+            my (%Fdecl, %Tdecl, %Tname, %Ident, %NotDecl) = ();
+            my $Content = readFile($TuDump);
+            $Content=~s/\n[ ]+/ /g;
+            
+            my @Lines = split(/\n/, $Content);
+            foreach my $N (0 .. $#Lines)
             {
-                my (%Fdecl, %Tdecl, %Tname, %Ident, %NotDecl) = ();
-                my $Content = readFile($TuDump);
-                $Content=~s/\n[ ]+/ /g;
-                
-                my @Lines = split(/\n/, $Content);
-                foreach my $N (0 .. $#Lines)
+                my $Line = $Lines[$N];
+                if(index($Line, "function_decl")!=-1
+                or index($Line, "var_decl")!=-1)
                 {
-                    my $Line = $Lines[$N];
-                    if(index($Line, "function_decl")!=-1
-                    or index($Line, "var_decl")!=-1)
+                    if($Line=~/name: \@(\d+)/)
                     {
-                        if($Line=~/name: \@(\d+)/)
+                        my $Id = $1;
+                        
+                        if($Line=~/srcp: ([^:]+)\:\d/)
                         {
-                            my $Id = $1;
-                            
-                            if($Line=~/srcp: ([^:]+)\:\d/)
-                            {
-                                if(defined $PublicHeader{$1}) {
-                                    $Fdecl{$Id} = $1;
-                                }
+                            if(defined $PublicHeader{$1}) {
+                                $Fdecl{$Id} = $1;
                             }
                         }
                     }
-                    elsif($Line=~/\@(\d+)\s+identifier_node\s+strg:\s+(\w+)/)
+                }
+                elsif($Line=~/\@(\d+)\s+identifier_node\s+strg:\s+(\w+)/)
+                {
+                    $Ident{$1} = $2;
+                }
+                elsif($Is_C)
+                {
+                    if(index($Line, "type_decl")!=-1)
                     {
-                        $Ident{$1} = $2;
-                    }
-                    elsif($Is_C)
-                    {
-                        if(index($Line, "type_decl")!=-1)
+                        if($Line=~/\A\@(\d+)/)
                         {
-                            if($Line=~/\A\@(\d+)/)
+                            my $Id = $1;
+                            if($Line=~/name: \@(\d+)/)
                             {
-                                my $Id = $1;
-                                if($Line=~/name: \@(\d+)/)
+                                my $NId = $1;
+                                
+                                if($Line=~/srcp: ([^:]+)\:\d/)
                                 {
-                                    my $NId = $1;
-                                    
-                                    if($Line=~/srcp: ([^:]+)\:\d/)
+                                    if(defined $PublicHeader{$1})
                                     {
-                                        if(defined $PublicHeader{$1})
-                                        {
-                                            $Tdecl{$Id} = $1;
-                                            $Tname{$Id} = $NId;
-                                        }
+                                        $Tdecl{$Id} = $1;
+                                        $Tname{$Id} = $NId;
                                     }
                                 }
                             }
                         }
-                        elsif(index($Line, "record_type")!=-1
-                        or index($Line, "union_type")!=-1)
-                        {
-                            if($Line!~/ flds:/)
-                            {
-                                if($Line=~/name: \@(\d+)/)
-                                {
-                                    $NotDecl{$1} = 1;
-                                }
-                            }
-                        }
-                        elsif(index($Line, "enumeral_type")!=-1)
-                        {
-                            if($Line!~/ csts:/)
-                            {
-                                if($Line=~/name: \@(\d+)/)
-                                {
-                                    $NotDecl{$1} = 1;
-                                }
-                            }
-                        }
-                        elsif(index($Line, "integer_type")!=-1)
+                    }
+                    elsif(index($Line, "record_type")!=-1
+                    or index($Line, "union_type")!=-1)
+                    {
+                        if($Line!~/ flds:/)
                         {
                             if($Line=~/name: \@(\d+)/)
                             {
@@ -5357,31 +5350,48 @@ sub detectPublicSymbols($)
                             }
                         }
                     }
-                }
-                
-                foreach my $Id (keys(%Fdecl))
-                {
-                    if(my $Name = $Ident{$Id}) {
-                        $SymbolToHeader{$Name} = $Fdecl{$Id};
-                    }
-                }
-                
-                if($Is_C)
-                {
-                    foreach my $Id (keys(%Tdecl))
+                    elsif(index($Line, "enumeral_type")!=-1)
                     {
-                        if(defined $NotDecl{$Id}) {
-                            next;
+                        if($Line!~/ csts:/)
+                        {
+                            if($Line=~/name: \@(\d+)/)
+                            {
+                                $NotDecl{$1} = 1;
+                            }
                         }
-                        
-                        if(my $Name = $Ident{$Tname{$Id}}) {
-                            $TypeToHeader{$Name} = $Tdecl{$Id};
+                    }
+                    elsif(index($Line, "integer_type")!=-1)
+                    {
+                        if($Line=~/name: \@(\d+)/)
+                        {
+                            $NotDecl{$1} = 1;
                         }
                     }
                 }
-                
-                unlink($TuDump);
             }
+            
+            foreach my $Id (keys(%Fdecl))
+            {
+                if(my $Name = $Ident{$Id}) {
+                    $SymbolToHeader{$Name}{$Fdecl{$Id}} = 1;
+                }
+            }
+            
+            if($Is_C)
+            {
+                foreach my $Id (keys(%Tdecl))
+                {
+                    if(defined $NotDecl{$Id}) {
+                        next;
+                    }
+                    
+                    if(my $Name = $Ident{$Tname{$Id}}) {
+                        $TypeToHeader{$Name} = $Tdecl{$Id};
+                    }
+                }
+            }
+            
+            unlink($TuDump);
         }
         else
         { # using Ctags
@@ -5395,7 +5405,7 @@ sub detectPublicSymbols($)
             foreach my $Line (split(/\n/, $List_S))
             {
                 if($Line=~/\A(\w+)/) {
-                    $SymbolToHeader{$1} = $HName;
+                    $SymbolToHeader{$1}{$HName} = 1;
                 }
             }
             
@@ -5635,11 +5645,14 @@ sub scenario()
     
     foreach my $Obj (@ARGV)
     {
-        $TargetName = getFilename(realpath($Obj));
-        $TargetName=~s/\.debug\Z//; # nouveau.ko.debug
-        
-        if(index($TargetName, "libstdc++.so")==0) {
-            $STDCXX_TARGET = 1;
+        if(not $TargetName)
+        {
+            $TargetName = getFilename(realpath($Obj));
+            $TargetName=~s/\.debug\Z//; # nouveau.ko.debug
+            
+            if(index($TargetName, "libstdc++.so")==0) {
+                $STDCXX_TARGET = 1;
+            }
         }
         
         read_Symbols($Obj);
@@ -5660,6 +5673,10 @@ sub scenario()
         read_Vtables($Obj);
     }
     
+    if(not defined $Library_Symbol{$TargetName}) {
+        exitStatus("Error", "can't find exported symbols in object(s), please add a shared object on command line");
+    }
+    
     if(not $Res) {
         exitStatus("No_DWARF", "can't find debug info in object(s)");
     }
@@ -5673,7 +5690,8 @@ sub scenario()
     {
         foreach my $Tid (sort {lc($TypeInfo{$a}{"Name"}) cmp lc($TypeInfo{$b}{"Name"})} keys(%TypeInfo))
         {
-            if(not $TypeInfo{$Tid}{"Header"})
+            if(not $TypeInfo{$Tid}{"Header"}
+            or not defined $PublicHeader{$TypeInfo{$Tid}{"Header"}})
             {
                 if($TypeInfo{$Tid}{"Type"}=~/Struct|Union|Enum|Typedef/)
                 {
