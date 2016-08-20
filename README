@@ -36,7 +36,7 @@ FILTER PUBLIC ABI:
   PATH — path to the install tree of a library
 
 COMPATIBILITY:
-  ABI Compliance Checker >= 1.99.14 (https://github.com/lvc/abi-compliance-checker)
+  ABI Compliance Checker >= 1.99.24 (https://github.com/lvc/abi-compliance-checker)
 
 ADV. USAGE:
   For advanced usage, see output of --help option.

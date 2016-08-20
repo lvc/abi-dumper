@@ -22,7 +22,7 @@
 #
 # COMPATIBILITY
 # =============
-#  ABI Compliance Checker >= 1.99.14
+#  ABI Compliance Checker >= 1.99.24
 #
 #
 # This program is free software: you can redistribute it and/or modify
@@ -361,6 +361,7 @@ my %TypeType = (
     "reference_type"=>"Ref",
     "rvalue_reference_type"=>"RvalueRef",
     "volatile_type"=>"Volatile",
+    "restrict_type"=>"Restrict",
     "typedef"=>"Typedef",
     "ptr_to_member_type"=>"FieldPtr",
     "string_type"=>"String"
@@ -371,6 +372,7 @@ my %Qual = (
     "Ref"=>"&",
     "RvalueRef"=>"&&",
     "Volatile"=>"volatile",
+    "Restrict"=>"restrict",
     "Const"=>"const"
 );
 
@@ -406,6 +408,7 @@ my %VirtualTable;
 my $SYS_ARCH;
 my $SYS_WORD;
 my $SYS_GCCV;
+my $SYS_CLANGV = undef;
 my $SYS_COMP;
 my $LIB_LANG;
 my $OBJ_LANG;
@@ -1562,6 +1565,9 @@ sub read_DWARF_Dump($$)
                                     }
                                 }
                             }
+                            elsif($Val=~/clang\s+version\s+([^\s\(]+)/) {
+                                $SYS_CLANGV = $1;
+                            }
                             else {
                                 $SYS_COMP = $Val;
                             }
@@ -1858,6 +1864,9 @@ sub dump_ABI()
     
     if($SYS_GCCV) {
         $ABI{"GccVersion"} = $SYS_GCCV;
+    }
+    elsif($SYS_CLANGV) {
+        $ABI{"ClangVersion"} = $SYS_CLANGV;
     }
     else {
         $ABI{"Compiler"} = $SYS_COMP;
@@ -3105,6 +3114,20 @@ sub getTypeInfo($)
         }
     }
     
+    if(defined $SYS_CLANGV
+    and $TInfo{"Type"} eq "FieldPtr")
+    { # Support for Clang
+        if(my $T = $DWARF_Info{$ID}{"type"})
+        {
+            if($DWARF_Info{$T}{"Kind"} eq "subroutine_type")
+            {
+                $TInfo{"Type"} = "MethodPtr";
+                $DWARF_Info{$ID}{"sibling"} = $T;
+                $DWARF_Info{$T}{"object_pointer"} = $DWARF_Info{$ID}{"containing_type"};
+            }
+        }
+    }
+    
     my $RealType = $TInfo{"Type"};
     
     if(defined $ClassMethods{$ID})
@@ -3286,6 +3309,27 @@ sub getTypeInfo($)
         }
     }
     
+    if($TInfo{"Type"} eq "Struct")
+    {
+        if(not $TInfo{"Name"}
+        and my $Sb = $DWARF_Info{$ID}{"sibling"})
+        {
+            if($DWARF_Info{$Sb}{"Kind"} eq "subroutine_type"
+            and defined $TInfo{"Memb"}
+            and $TInfo{"Memb"}{0}{"name"} eq "__pfn")
+            { # __pfn and __delta
+                $TInfo{"Type"} = "MethodPtr";
+            }
+        }
+    }
+    
+    if($TInfo{"Type"}=~/Pointer|Ptr|Ref/)
+    {
+        if(not $TInfo{"Size"}) {
+            $TInfo{"Size"} = $SYS_WORD;
+        }
+    }
+    
     if($TInfo{"Type"} eq "Pointer")
     {
         if($DWARF_Info{$TInfo{"BaseType"}}{"Kind"} eq "subroutine_type")
@@ -3304,60 +3348,54 @@ sub getTypeInfo($)
     {
         init_FuncType(\%TInfo, $ID, "Func");
     }
-    elsif($TInfo{"Type"} eq "Struct")
+    elsif($TInfo{"Type"} eq "MethodPtr")
     {
-        if(not $TInfo{"Name"}
-        and my $Sb = $DWARF_Info{$ID}{"sibling"})
+        if(my $Sb = $DWARF_Info{$ID}{"sibling"})
         {
-            if($DWARF_Info{$Sb}{"Kind"} eq "subroutine_type"
-            and defined $TInfo{"Memb"}
-            and $TInfo{"Memb"}{0}{"name"} eq "__pfn")
-            { # __pfn and __delta
-                $TInfo{"Type"} = "MethodPtr";
+            my @Prms = ();
+            my $PPos = 0;
+            foreach my $Pos (sort {int($a)<=>int($b)} keys(%{$FuncParam{$Sb}}))
+            {
+                my $ParamId = $FuncParam{$Sb}{$Pos};
+                my %PInfo = %{$DWARF_Info{$ParamId}};
                 
-                my @Prms = ();
-                my $PPos = 0;
-                foreach my $Pos (sort {int($a)<=>int($b)} keys(%{$FuncParam{$Sb}}))
+                if(defined $PInfo{"artificial"})
+                { # this
+                    next;
+                }
+                
+                if(my $PTypeId = $PInfo{"type"})
                 {
-                    my $ParamId = $FuncParam{$Sb}{$Pos};
-                    my %PInfo = %{$DWARF_Info{$ParamId}};
-                    
-                    if(defined $PInfo{"artificial"})
-                    { # this
-                        next;
-                    }
-                    
-                    if(my $PTypeId = $PInfo{"type"})
-                    {
-                        $TInfo{"Param"}{$PPos}{"type"} = $PTypeId;
-                        getTypeInfo($PTypeId);
-                        push(@Prms, $TypeInfo{$PTypeId}{"Name"});
-                    }
-                    
-                    $PPos += 1;
+                    $TInfo{"Param"}{$PPos}{"type"} = $PTypeId;
+                    getTypeInfo($PTypeId);
+                    push(@Prms, $TypeInfo{$PTypeId}{"Name"});
                 }
                 
-                if(my $ClassId = $DWARF_Info{$Sb}{"object_pointer"})
-                {
-                    while($DWARF_Info{$ClassId}{"type"}) {
-                        $ClassId = $DWARF_Info{$ClassId}{"type"};
-                    }
-                    $TInfo{"Class"} = $ClassId;
-                    getTypeInfo($TInfo{"Class"});
-                }
-                
-                if($TInfo{"Return"} = $DWARF_Info{$Sb}{"type"}) {
-                    getTypeInfo($TInfo{"Return"});
-                }
-                else
-                { # void
-                    $TInfo{"Return"} = "1";
-                }
-                
-                $TInfo{"Name"} = $TypeInfo{$TInfo{"Return"}}{"Name"};
-                $TInfo{"Name"} .= "(".$TypeInfo{$TInfo{"Class"}}{"Name"}."::*)";
-                $TInfo{"Name"} .= "(".join(",", @Prms).")";
+                $PPos += 1;
             }
+            
+            if(my $ClassId = $DWARF_Info{$Sb}{"object_pointer"})
+            {
+                while($DWARF_Info{$ClassId}{"type"}) {
+                    $ClassId = $DWARF_Info{$ClassId}{"type"};
+                }
+                $TInfo{"Class"} = $ClassId;
+                getTypeInfo($TInfo{"Class"});
+            }
+            
+            if($TInfo{"Return"} = $DWARF_Info{$Sb}{"type"}) {
+                getTypeInfo($TInfo{"Return"});
+            }
+            else
+            { # void
+                $TInfo{"Return"} = "1";
+            }
+            
+            $TInfo{"Name"} = $TypeInfo{$TInfo{"Return"}}{"Name"};
+            $TInfo{"Name"} .= "(".$TypeInfo{$TInfo{"Class"}}{"Name"}."::*)";
+            $TInfo{"Name"} .= "(".join(",", @Prms).")";
+            
+            delete($TInfo{"BaseType"});
         }
     }
     elsif($TInfo{"Type"} eq "FieldPtr")
