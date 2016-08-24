@@ -977,44 +977,47 @@ sub read_DWARF_Info($)
             my $DPath = $DebugFile;
             my $DName = getFilename($DPath);
             
+            printMsg("INFO", "Found gnu_debuglink to $DName");
+            
             if(my $DDir = getDirname($Path))
             {
                 $DPath = $DDir."/".$DPath;
             }
             
             my $Found = undef;
+            
             if(defined $SearchDirDebuginfo)
             {
-                my @Files = findFiles($SearchDirDebuginfo, "f");
-                
-                foreach my $F (@Files)
+                if(-f $SearchDirDebuginfo."/".$DName) {
+                    $Found = $SearchDirDebuginfo."/".$DName;
+                }
+                else
                 {
-                    if(getFilename($F) eq $DName)
+                    my @Files = findFiles($SearchDirDebuginfo, "f");
+                    
+                    foreach my $F (@Files)
                     {
-                        $Found = $F;
-                        last;
+                        if(getFilename($F) eq $DName)
+                        {
+                            $Found = $F;
+                            last;
+                        }
                     }
                 }
             }
-            
-            if($Found)
-            {
-                $DPath = $Found;
-                printMsg("INFO", "Found debuginfo $DName (gnu_debuglink)");
+            elsif(-f $DPath
+            and $DPath ne $Path) {
+                $Found = $DPath;
             }
             
-            if($DPath ne $Path)
+            if($Found and $Found ne $Path)
             {
-                if(-e $DPath)
-                {
-                    printMsg("INFO", "Reading debuginfo $DName (gnu_debuglink)");
-                    return read_DWARF_Info($DPath);
-                }
-                else {
-                    printMsg("WARNING", "missed debuginfo $DName (gnu_debuglink)");
-                }
+                printMsg("INFO", "Reading debug-info file $DName (gnu_debuglink)");
+                return read_DWARF_Info($Found);
             }
-            else {
+            else
+            {
+                printMsg("WARNING", "missed debug-info file $DName (gnu_debuglink)");
                 return 0;
             }
         }
