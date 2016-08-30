@@ -67,7 +67,7 @@ $SkipCxx, $Loud, $AddrToName, $DumpStatic, $Compare, $AltDebugInfoOpt,
 $AddDirs, $VTDumperPath, $SymbolsListPath, $PublicHeadersPath,
 $IgnoreTagsPath, $KernelExport, $UseTU, $ReimplementStd,
 $IncludePreamble, $IncludePaths, $CacheHeaders, $MixedHeaders, $Debug,
-$SearchDirDebuginfo, $KeepRegsAndOffsets);
+$SearchDirDebuginfo, $KeepRegsAndOffsets, $Quiet);
 
 my $CmdName = getFilename($0);
 
@@ -131,6 +131,7 @@ GetOptions("h|help!" => \$Help,
   "kernel-export!" => \$KernelExport,
   "search-debuginfo=s" => \$SearchDirDebuginfo,
   "keep-registers-and-offsets!" => \$KeepRegsAndOffsets,
+  "quiet!" => \$Quiet,
   "debug!" => \$Debug,
 # extra options
   "use-tu-dump!" => \$UseTU,
@@ -267,6 +268,9 @@ GENERAL OPTIONS:
   -keep-registers-and-offsets
       Dump used registers and stack offsets even if incompatible
       build options detected.
+  
+  -quiet
+      Do not warn about incompatible build options.
   
   -debug
       Enable debug messages.
@@ -1557,13 +1561,17 @@ sub read_DWARF_Dump($$)
                                     {
                                         if($Opts{keys(%Opts)-1} ne "-Og")
                                         {
-                                            printMsg("WARNING", "incompatible build option detected: ".$Opts{keys(%Opts)-1}." (required -Og for better analysis)");
+                                            if(not defined $Quiet) {
+                                                printMsg("WARNING", "incompatible build option detected: ".$Opts{keys(%Opts)-1}." (required -Og for better analysis)");
+                                            }
                                             $IncompatibleOpt = 1;
                                         }
                                     }
                                     else
                                     {
-                                        printMsg("WARNING", "the object should be compiled with -Og option for better analysis");
+                                        if(not defined $Quiet) {
+                                            printMsg("WARNING", "the object should be compiled with -Og option for better analysis");
+                                        }
                                         $IncompatibleOpt = 1;
                                     }
                                 }
@@ -5494,19 +5502,13 @@ sub getDebugAltLink($)
         $AltObj_R = $Dir."/".$AltObj_R;
     }
     
-    my $AltObj = $AltObj_R;
-    
-    while($AltObj=~s&/[^/]+/\.\./&/&){};
-    
-    if(-e $AltObj)
+    if(-e $AltObj_R)
     {
-        printMsg("INFO", "Set alternate debug-info file to \'$AltObj\' (use -alt option to change it)");
-        return $AltObj;
-    }
-    else {
-        printMsg("WARNING", "can't access \'$AltObj_R\'");
+        printMsg("INFO", "Set alternate debug-info file to \'$AltObj_R\' (use -alt option to change it)");
+        return $AltObj_R;
     }
     
+    printMsg("WARNING", "can't access \'$AltObj_R\'");
     return undef;
 }
 
