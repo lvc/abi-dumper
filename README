@@ -8,7 +8,7 @@ NAME:
 
 INSTALL:
   sudo make install prefix=/usr
-  
+
 REQUIRES:
   Perl 5 (5.8 or newer)
   Elfutils (eu-readelf)
@@ -18,22 +18,22 @@ REQUIRES:
 USAGE:
   abi-dumper libTest.so -o ABI.dump
   abi-dumper Module.ko.debug
-  
+
 EXAMPLES:
   abi-dumper lib/libssh.so.3
   abi-dumper drm/nouveau/nouveau.ko.debug
-  
+
 NOTE:
   Input objects should be compiled with -g -Og additional options to contain DWARF debug info.
-  
-ABI CHECK:
-  abi-dumper libTest.so.0 -o ABIv0.dump
-  abi-dumper libTest.so.1 -o ABIv1.dump
-  abi-compliance-checker -l libTest -old ABIv0.dump -new ABIv1.dump
 
 FILTER PUBLIC ABI:
   abi-dumper libTest.so -public-headers PATH
   PATH — path to the install tree of a library
+
+ABI CHECK:
+  abi-dumper libTest.so.0 -o ABIv0.dump
+  abi-dumper libTest.so.1 -o ABIv1.dump
+  abi-compliance-checker -l libTest -old ABIv0.dump -new ABIv1.dump
 
 COMPATIBILITY:
   ABI Compliance Checker >= 1.99.24 (https://github.com/lvc/abi-compliance-checker)

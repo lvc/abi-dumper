@@ -311,6 +311,7 @@ my %DWARF_Info;
 my %ImportedUnit;
 my %ImportedDecl;
 my $AltDebugInfo = undef;
+my $TooBig = 0;
 
 # Dump
 my %TypeUnit;
@@ -388,7 +389,7 @@ my %ConstSuffix = (
     "long long" => "ll"
 );
 
-my $HEADER_EXT = "h|hh|hp|hxx|hpp|h\\+\\+|tcc";
+my $HEADER_EXT = "h|hh|hp|hxx|hpp|h\\+\\+|tcc|x|inl|ads";
 my $SRC_EXT = "c|cpp|cxx|c\\+\\+";
 
 # Other
@@ -966,6 +967,10 @@ sub read_DWARF_Info($)
         exitStatus("Not_Found", "can't find \"$EU_READELF\" command");
     }
     
+    if(-s $Path > 1024*1024*100) {
+        $TooBig = 1;
+    }
+    
     my $AddOpt = "";
     if(not defined $AddrToName)
     { # disable search of symbol names
@@ -981,7 +986,7 @@ sub read_DWARF_Info($)
             my $DPath = $DebugFile;
             my $DName = getFilename($DPath);
             
-            printMsg("INFO", "Found gnu_debuglink to $DName");
+            printMsg("INFO", "Found link to $DName (gnu_debuglink)");
             
             if(my $DDir = getDirname($Path))
             {
@@ -1016,12 +1021,12 @@ sub read_DWARF_Info($)
             
             if($Found and $Found ne $Path)
             {
-                printMsg("INFO", "Reading debug-info file $DName (gnu_debuglink)");
+                printMsg("INFO", "Reading debug-info file $DName linked from gnu_debuglink");
                 return read_DWARF_Info($Found);
             }
             else
             {
-                printMsg("WARNING", "missed debug-info file $DName (gnu_debuglink)");
+                printMsg("ERROR", "missed debug-info file $DName linked from gnu_debuglink (try --search-debuginfo=DIR option)");
                 return 0;
             }
         }
@@ -1039,6 +1044,13 @@ sub read_DWARF_Info($)
             else {
                 exitStatus("Error", "can't read gnu_debugaltlink");
             }
+        }
+    }
+    
+    if($AltDebugInfo)
+    {
+        if($TooBig) {
+            printMsg("WARNING", "input object is too big and compressed, may require a lot of RAM memory to proceed");
         }
     }
     
@@ -1549,38 +1561,38 @@ sub read_DWARF_Dump($$)
                                 { # 4.6.1 20110627 (Mandriva)
                                     $SYS_GCCV = $1.$2;
                                 }
-                                
-                                if(not defined $KeepRegsAndOffsets)
-                                {
-                                    my %Opts = ();
-                                    while($Val=~s/(\A| )(\-O([0-3]|g))( |\Z)/ /) {
-                                        $Opts{keys(%Opts)} = $2;
-                                    }
-                                    
-                                    if(keys(%Opts))
-                                    {
-                                        if($Opts{keys(%Opts)-1} ne "-Og")
-                                        {
-                                            if(not defined $Quiet) {
-                                                printMsg("WARNING", "incompatible build option detected: ".$Opts{keys(%Opts)-1}." (required -Og for better analysis)");
-                                            }
-                                            $IncompatibleOpt = 1;
-                                        }
-                                    }
-                                    else
-                                    {
-                                        if(not defined $Quiet) {
-                                            printMsg("WARNING", "the object should be compiled with -Og option for better analysis");
-                                        }
-                                        $IncompatibleOpt = 1;
-                                    }
-                                }
                             }
                             elsif($Val=~/clang\s+version\s+([^\s\(]+)/) {
                                 $SYS_CLANGV = $1;
                             }
                             else {
                                 $SYS_COMP = $Val;
+                            }
+                            
+                            if(not defined $KeepRegsAndOffsets)
+                            {
+                                my %Opts = ();
+                                while($Val=~s/(\A| )(\-O([0-3]|g))( |\Z)/ /) {
+                                    $Opts{keys(%Opts)} = $2;
+                                }
+                                
+                                if(keys(%Opts))
+                                {
+                                    if($Opts{keys(%Opts)-1} ne "-Og")
+                                    {
+                                        if(not defined $Quiet) {
+                                            printMsg("WARNING", "incompatible build option detected: ".$Opts{keys(%Opts)-1}." (required -Og for better analysis)");
+                                        }
+                                        $IncompatibleOpt = 1;
+                                    }
+                                }
+                                else
+                                {
+                                    if(not defined $Quiet) {
+                                        printMsg("WARNING", "the object should be compiled with -Og option for better analysis");
+                                    }
+                                    $IncompatibleOpt = 1;
+                                }
                             }
                         }
                     }
@@ -1610,6 +1622,10 @@ sub read_DWARF_Dump($$)
                 if($Kind eq "partial_unit" or $Kind eq "type_unit")
                 { # compressed debug_info
                     $Compressed = 1;
+                    
+                    if($TooBig) {
+                        printMsg("WARNING", "input object is too big and compressed, may require a lot of RAM memory to proceed");
+                    }
                 }
             }
             
@@ -3672,7 +3688,7 @@ sub setSource($$)
             $Name = $SourceFile_Alt{0}{$File};
         }
         
-        if($Name=~/\.($HEADER_EXT)\Z/)
+        if($Name=~/\.($HEADER_EXT)\Z/i)
         { # header
             $R->{"Header"} = $Name;
             if(defined $Line) {
@@ -5179,7 +5195,7 @@ sub findFiles(@)
 sub isHeader($)
 {
     my $Path = $_[0];
-    return ($Path=~/\.(h|hh|hp|hxx|hpp|h\+\+|tcc|x|inl)\Z/i);
+    return ($Path=~/\.($HEADER_EXT)\Z/i);
 }
 
 sub detectPublicSymbols($)
