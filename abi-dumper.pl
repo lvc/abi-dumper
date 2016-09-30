@@ -83,7 +83,9 @@ my %ERROR_CODE = (
     # No debug-info
     "No_DWARF"=>10,
     # Invalid debug-info
-    "Invalid_DWARF"=>11
+    "Invalid_DWARF"=>11,
+    # No exported symbols
+    "No_Exported"=>12
 );
 
 my $ShortUsage = "ABI Dumper $TOOL_VERSION
@@ -5212,18 +5214,14 @@ sub detectPublicSymbols($)
     
     if($UseTU)
     {
-        if(not check_Cmd($GPP))
-        {
-            printMsg("ERROR", "can't find \"$GPP\"");
-            return;
+        if(not check_Cmd($GPP)) {
+            exitStatus("Not_Found", "can't find \"$GPP\"");
         }
     }
     else
     {
-        if(not check_Cmd($CTAGS))
-        {
-            printMsg("ERROR", "can't find \"$CTAGS\"");
-            return;
+        if(not check_Cmd($CTAGS)) {
+            exitStatus("Not_Found", "can't find \"$CTAGS\"");
         }
     }
     
@@ -5733,7 +5731,7 @@ sub scenario()
     }
     
     if(not defined $Library_Symbol{$TargetName}) {
-        exitStatus("Error", "can't find exported symbols in object(s), please add a shared object on command line");
+        exitStatus("No_Exported", "can't find exported symbols in object(s), please add a shared object on command line");
     }
     
     if(not $Res) {
