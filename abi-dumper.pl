@@ -603,7 +603,7 @@ sub read_Symbols($)
     my $Dbg = ($Lib_Name=~/\.debug\Z/);
     
     if(not check_Cmd($EU_READELF)) {
-        exitStatus("Not_Found", "can't find \"eu-readelf\"");
+        exitStatus("Not_Found", "can't find \"eu-readelf\" from Elfutils");
     }
     
     my %SectionInfo;
@@ -5222,6 +5222,13 @@ sub detectPublicSymbols($)
     {
         if(not check_Cmd($CTAGS)) {
             exitStatus("Not_Found", "can't find \"$CTAGS\"");
+        }
+        
+        if(my $CtagsVer = `$CTAGS --version 2>&1`)
+        {
+            if($CtagsVer!~/Universal/i) {
+                printMsg("ERROR", "requires Universal Ctags to work properly");
+            }
         }
     }
     

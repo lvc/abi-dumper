@@ -4,16 +4,16 @@ NAME:
   The tool is intended to be used with ABI Compliance Checker tool for tracking
   ABI changes of a C/C++ library or kernel module.
   
-  The tool is developed by Andrey Ponomarenko: http://abi-laboratory.pro/
+  The tool is developed by Andrey Ponomarenko: https://abi-laboratory.pro/
 
 INSTALL:
   sudo make install prefix=/usr
 
 REQUIRES:
-  Perl 5 (5.8 or newer)
+  Perl 5
   Elfutils (eu-readelf)
-  Vtable Dumper (1.0 or newer, https://github.com/lvc/vtable-dumper)
-  Universal Ctags
+  Vtable Dumper >= 1.1 (https://github.com/lvc/vtable-dumper)
+  Universal Ctags      (https://github.com/universal-ctags/ctags)
 
 USAGE:
   abi-dumper libTest.so -o ABI.dump
