@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 0.99.18
+# ABI Dumper 0.99.19
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013-2016 Andrey Ponomarenko's ABI Laboratory
@@ -46,7 +46,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "0.99.18";
+my $TOOL_VERSION = "0.99.19";
 my $ABI_DUMP_VERSION = "3.3";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -3956,11 +3956,19 @@ sub getSymbolInfo($)
                 if(defined $Checked_Spec{$MnglName}
                 or not $DWARF_Info{$ID}{"specification"})
                 {
-                    if(not defined $SpecElem{$ID}
-                    and not defined $OrigElem{$ID}) {
-                        delete($DWARF_Info{$ID});
+                    if(defined $SymbolInfo{$OLD_ID}{"Param"}
+                    or not defined $FuncParam{$ID})
+                    {
+                        if(defined $SymbolInfo{$OLD_ID}{"Return"}
+                        or not defined $DWARF_Info{$ID}{"type"})
+                        {
+                            if(not defined $SpecElem{$ID}
+                            and not defined $OrigElem{$ID}) {
+                                delete($DWARF_Info{$ID});
+                            }
+                            return;
+                        }
                     }
-                    return;
                 }
             }
         }
