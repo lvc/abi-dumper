@@ -12,8 +12,10 @@ INSTALL:
 REQUIRES:
   Perl 5
   Elfutils (eu-readelf)
+  GNU Binutils
   Vtable Dumper >= 1.1 (https://github.com/lvc/vtable-dumper)
   Universal Ctags      (https://github.com/universal-ctags/ctags)
+  GCC C++
 
 USAGE:
   abi-dumper libTest.so -o ABI.dump

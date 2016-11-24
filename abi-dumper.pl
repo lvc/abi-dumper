@@ -15,10 +15,10 @@
 # ============
 #  Perl 5 (5.8 or newer)
 #  Elfutils (eu-readelf)
+#  GNU Binutils (objdump)
 #  Vtable-Dumper (1.1 or newer)
-#  Binutils (objdump)
 #  Universal Ctags
-#  GCC (g++)
+#  GCC C++
 #
 # COMPATIBILITY
 # =============
@@ -1349,7 +1349,7 @@ sub read_DWARF_Dump($$)
             $Import_Num+=1;
         }
         
-        if(defined $ID and $Line=~/\A\s*(\w+)\s*(.+?)\s*\Z/)
+        if(defined $ID and $Line=~/\A\s*(\w+)\s+(.+?)\s*\Z/)
         {
             if(defined $Skip_Block) {
                 next;
@@ -1829,7 +1829,7 @@ sub read_Vtables($)
             $ExtraPath = $ExtraInfo."/v-tables";
         }
         
-        system("LD_LIBRARY_PATH=\"$Dir\" $VTABLE_DUMPER -mangled -demangled \"$Path\" 2>\"$TMP_DIR/error\" >\"$ExtraPath\"");
+        system("LD_LIBRARY_PATH=\"$Dir\" $VTABLE_DUMPER -mangled -demangled \"$Path\" >\"$ExtraPath\"");
         
         my $Content = readFile($ExtraPath);
         foreach my $ClassInfo (split(/\n\n\n/, $Content))
@@ -2034,14 +2034,31 @@ sub complete_Dump($)
     %UsedDecl = ();
 }
 
+my %IsType = map {$_=>1} (
+    "struct_type",
+    "structure_type",
+    "class_type",
+    "union_type",
+    "enumeration_type",
+    "subroutine_type",
+    "array_type"
+);
+
+my %MainKind = map {$_=>1} (
+    "typedef",
+    "subprogram",
+    "variable",
+    "namespace"
+);
+
 sub read_ABI()
 {
     my %CurID = ();
     
-    my @IDs = sort {int($a) <=> int($b)} keys(%DWARF_Info);
+    my @IDs = sort {$a<=>$b} keys(%DWARF_Info);
     
     if($AltDebugInfo) {
-        @IDs = sort {$b>0 <=> $a>0} sort {abs(int($a)) <=> abs(int($b))} @IDs;
+        @IDs = sort {$b>0<=>$a>0} sort {abs($a)<=>abs($b)} @IDs;
     }
     
     my $TPack = undef;
@@ -2068,13 +2085,8 @@ sub read_ABI()
             delete($DWARF_Info{$ID}{"NS"});
         }
         
-        my $IsType = ($Kind=~/(struct|structure|class|union|enumeration|subroutine|array)_type/);
-        
-        if($IsType
-        or $Kind eq "typedef"
-        or $Kind eq "subprogram"
-        or $Kind eq "variable"
-        or $Kind eq "namespace")
+        if(defined $IsType{$Kind}
+        or defined $MainKind{$Kind})
         {
             if($Kind ne "variable"
             and $Kind ne "typedef")
@@ -2106,7 +2118,7 @@ sub read_ABI()
                 $OrigElem{$Orig} = $ID;
             }
             
-            if($IsType)
+            if(defined $IsType{$Kind})
             {
                 if(not $DWARF_Info{$ID}{"name"}
                 and $DWARF_Info{$ID}{"linkage_name"})
@@ -2124,8 +2136,8 @@ sub read_ABI()
             {
                 $NameSpace{$ID} = $Scope;
                 
-                if($DWARF_Info{$Scope}{"Kind"}=~/class|struct/
-                and not defined $DWARF_Info{$ID}{"data_member_location"})
+                if(not defined $DWARF_Info{$ID}{"data_member_location"}
+                and $DWARF_Info{$Scope}{"Kind"}=~/class|struct/)
                 { # variable (global data)
                     next;
                 }
@@ -2224,10 +2236,10 @@ sub read_ABI()
         
     }
     
-    my @IDs = sort {int($a) <=> int($b)} keys(%DWARF_Info);
+    my @IDs = sort {$a<=>$b} keys(%DWARF_Info);
     
     if($AltDebugInfo) {
-        @IDs = sort {$b>0 <=> $a>0} sort {abs(int($a)) <=> abs(int($b))} @IDs;
+        @IDs = sort {$b>0<=>$a>0} sort {abs($a) <=> abs($b)} @IDs;
     }
     
     foreach my $ID (@IDs)
@@ -2278,7 +2290,7 @@ sub read_ABI()
         }
     }
     
-    foreach my $ID (sort {int($a) <=> int($b)} keys(%DWARF_Info))
+    foreach my $ID (sort {$a<=>$b} keys(%DWARF_Info))
     {
         if($ID<0)
         { # imported
@@ -3145,13 +3157,13 @@ sub getTypeInfo($)
     
     if(defined $SYS_CLANGV
     and $TInfo{"Type"} eq "FieldPtr")
-    { # Support for Clang
+    { # support for Clang
         if(my $T = $DWARF_Info{$ID}{"type"})
         {
             if($DWARF_Info{$T}{"Kind"} eq "subroutine_type")
             {
                 $TInfo{"Type"} = "MethodPtr";
-                $DWARF_Info{$ID}{"sibling"} = $T;
+                $DWARF_Info{$ID}{"pfn"} = $T;
                 $DWARF_Info{$T}{"object_pointer"} = $DWARF_Info{$ID}{"containing_type"};
             }
         }
@@ -3194,9 +3206,9 @@ sub getTypeInfo($)
         foreach my $Pos (sort {int($a) <=> int($b)} keys(%{$TypeMember{$ID}}))
         {
             my $MemId = $TypeMember{$ID}{$Pos};
-            my %MInfo = %{$DWARF_Info{$MemId}};
+            my $MInfo = $DWARF_Info{$MemId};
             
-            if(my $Name = $MInfo{"name"})
+            if(my $Name = $MInfo->{"name"})
             {
                 if(index($Name, "_vptr.")==0)
                 { # v-table pointer
@@ -3210,12 +3222,12 @@ sub getTypeInfo($)
                 $Unnamed += 1;
             }
             if($TInfo{"Type"} eq "Enum") {
-                $TInfo{"Memb"}{$Pos}{"value"} = $MInfo{"const_value"};
+                $TInfo{"Memb"}{$Pos}{"value"} = $MInfo->{"const_value"};
             }
             else
             {
-                $TInfo{"Memb"}{$Pos}{"type"} = $MInfo{"type"};
-                if(my $Access = $MInfo{"accessibility"})
+                $TInfo{"Memb"}{$Pos}{"type"} = $MInfo->{"type"};
+                if(my $Access = $MInfo->{"accessibility"})
                 {
                     if($Access ne "public")
                     { # NOTE: default access of members in the ABI dump is "public"
@@ -3236,12 +3248,12 @@ sub getTypeInfo($)
                 if($TInfo{"Type"} eq "Union") {
                     $TInfo{"Memb"}{$Pos}{"offset"} = "0";
                 }
-                elsif(defined $MInfo{"data_member_location"}) {
-                    $TInfo{"Memb"}{$Pos}{"offset"} = $MInfo{"data_member_location"};
+                elsif(defined $MInfo->{"data_member_location"}) {
+                    $TInfo{"Memb"}{$Pos}{"offset"} = $MInfo->{"data_member_location"};
                 }
             }
             
-            if((my $BitSize = $MInfo{"bit_size"}) ne "") {
+            if((my $BitSize = $MInfo->{"bit_size"}) ne "") {
                 $TInfo{"Memb"}{$Pos}{"bitfield"} = $BitSize;
             }
         }
@@ -3340,14 +3352,19 @@ sub getTypeInfo($)
     
     if($TInfo{"Type"} eq "Struct")
     {
-        if(not $TInfo{"Name"}
-        and my $Sb = $DWARF_Info{$ID}{"sibling"})
+        if(not $TInfo{"Name"})
         {
-            if($DWARF_Info{$Sb}{"Kind"} eq "subroutine_type"
-            and defined $TInfo{"Memb"}
+            if(defined $TInfo{"Memb"}
             and $TInfo{"Memb"}{0}{"name"} eq "__pfn")
             { # __pfn and __delta
-                $TInfo{"Type"} = "MethodPtr";
+                my $Pfn = $TInfo{"Memb"}{0}{"type"};
+                if(my $Pfn_B = $DWARF_Info{$Pfn}{"type"})
+                {
+                    if($DWARF_Info{$Pfn_B}{"Kind"} eq "subroutine_type")
+                    {
+                        $TInfo{"Type"} = "MethodPtr";
+                    }
+                }
             }
         }
     }
@@ -3379,13 +3396,27 @@ sub getTypeInfo($)
     }
     elsif($TInfo{"Type"} eq "MethodPtr")
     {
-        if(my $Sb = $DWARF_Info{$ID}{"sibling"})
+        my $Pfn_B = undef;
+        
+        if(defined $TInfo{"Memb"}
+        and $TInfo{"Memb"}{0}{"name"} eq "__pfn")
+        {
+            if(my $Pfn = $TInfo{"Memb"}{0}{"type"}) {
+                $Pfn_B = $DWARF_Info{$Pfn}{"type"};
+            }
+        }
+        else
+        { # support for Clang
+            $Pfn_B = $DWARF_Info{$ID}{"pfn"};
+        }
+        
+        if($Pfn_B)
         {
             my @Prms = ();
             my $PPos = 0;
-            foreach my $Pos (sort {int($a)<=>int($b)} keys(%{$FuncParam{$Sb}}))
+            foreach my $Pos (sort {int($a)<=>int($b)} keys(%{$FuncParam{$Pfn_B}}))
             {
-                my $ParamId = $FuncParam{$Sb}{$Pos};
+                my $ParamId = $FuncParam{$Pfn_B}{$Pos};
                 my %PInfo = %{$DWARF_Info{$ParamId}};
                 
                 if(defined $PInfo{"artificial"})
@@ -3403,7 +3434,7 @@ sub getTypeInfo($)
                 $PPos += 1;
             }
             
-            if(my $ClassId = $DWARF_Info{$Sb}{"object_pointer"})
+            if(my $ClassId = $DWARF_Info{$Pfn_B}{"object_pointer"})
             {
                 while($DWARF_Info{$ClassId}{"type"}) {
                     $ClassId = $DWARF_Info{$ClassId}{"type"};
@@ -3412,7 +3443,7 @@ sub getTypeInfo($)
                 getTypeInfo($TInfo{"Class"});
             }
             
-            if($TInfo{"Return"} = $DWARF_Info{$Sb}{"type"}) {
+            if($TInfo{"Return"} = $DWARF_Info{$Pfn_B}{"type"}) {
                 getTypeInfo($TInfo{"Return"});
             }
             else
