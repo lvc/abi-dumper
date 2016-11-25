@@ -3721,7 +3721,8 @@ sub setSource($$)
             $Name = $SourceFile_Alt{0}{$File};
         }
         
-        if($Name=~/\.($HEADER_EXT)\Z/i)
+        if($Name=~/\.($HEADER_EXT)\Z/i
+        or index($Name, ".")==-1)
         { # header
             $R->{"Header"} = $Name;
             if(defined $Line) {
@@ -5236,7 +5237,17 @@ sub findFiles(@)
 sub isHeader($)
 {
     my $Path = $_[0];
-    return ($Path=~/\.($HEADER_EXT)\Z/i);
+    
+    if($Path=~/\.($HEADER_EXT)\Z/i) {
+        return 1;
+    }
+    
+    if(index(getFilename($Path), ".")==-1)
+    { # C++
+        return 1;
+    }
+    
+    return 0;
 }
 
 sub detectPublicSymbols($)
@@ -5510,17 +5521,32 @@ sub detectPublicSymbols($)
                 $IgnoreTags = "-I \@".$IgnoreTagsPath;
             }
             
-            my $List_S = `$CTAGS -x --c-kinds=fpvx $IgnoreTags \"$File\"`;
+            my $Lang = "--language-force=C++";
+            if($Is_C) {
+                $Lang = "--language-force=C";
+            }
+            
+            my $List_S = `$CTAGS -x --c-kinds=fpvx $Lang $IgnoreTags \"$File\"`;
             foreach my $Line (split(/\n/, $List_S))
             {
                 if($Line=~/\A(\w+)/) {
                     $SymbolToHeader{$1}{$HName} = 1;
                 }
+                
+                if(not $Is_C)
+                {
+                    if(index($Line, "operator ")==0)
+                    {
+                        if($Line=~/\A(operator .+?)\s+(prototype)/) {
+                            $SymbolToHeader{$1}{$HName} = 1;
+                        }
+                    }
+                }
             }
             
             if($Is_C)
             {
-                my $List_T = `$CTAGS -x --c-kinds=gstu --language-force=c $IgnoreTags \"$File\"`;
+                my $List_T = `$CTAGS -x --c-kinds=gstu $Lang $IgnoreTags \"$File\"`;
                 foreach my $Line (split(/\n/, $List_T))
                 {
                     if($Line=~/\A(\w+)/)
@@ -5753,7 +5779,8 @@ sub scenario()
             $TargetName = getFilename(realpath($Obj));
             $TargetName=~s/\.debug\Z//; # nouveau.ko.debug
             
-            if(index($TargetName, "libstdc++.so")==0) {
+            if(index($TargetName, "libstdc++")==0
+            or index($TargetName, "libc++")==0) {
                 $STDCXX_TARGET = 1;
             }
         }
