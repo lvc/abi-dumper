@@ -401,6 +401,7 @@ my %HeadersInfo;
 my %SourcesInfo;
 my %SymVer;
 my %UsedType;
+my %DeletedAnon;
 
 # ELF
 my %Library_Symbol;
@@ -1556,7 +1557,7 @@ sub read_DWARF_Dump($$)
                             $Val=~s/\A\"//;
                             $Val=~s/\"\Z//;
                             
-                            if($Val=~/GNU\s+(C\d*|C\+\+)\s+(.+)\Z/)
+                            if($Val=~/GNU\s+(C\d*|C\+\+|GIMPLE)\s+(.+)\Z/)
                             {
                                 $SYS_GCCV = $2;
                                 if($SYS_GCCV=~/\A(\d+\.\d+)(\.\d+|)/)
@@ -2395,8 +2396,6 @@ sub complete_ABI()
     # free memory
     %Incomplete = ();
     
-    my %Delete = ();
-    
     foreach my $Tid (sort {int($a) <=> int($b)} keys(%TypeInfo))
     {
         if($TypeInfo{$Tid}{"Type"} eq "Typedef")
@@ -2428,7 +2427,7 @@ sub complete_ABI()
                     if($NS) {
                         $TypeInfo{$Tid}{"NameSpace"} = $NS;
                     }
-                    $Delete{$BTid} = $Tid;
+                    $DeletedAnon{$BTid} = $Tid;
                 }
             }
         }
@@ -2436,7 +2435,7 @@ sub complete_ABI()
         {
             if(my $BTid = $TypeInfo{$Tid}{"BaseType"})
             {
-                if(my $To = $Delete{$BTid})
+                if(my $To = $DeletedAnon{$BTid})
                 {
                     $TypeInfo{$Tid}{"BaseType"} = $To;
                     $TypeInfo{$Tid}{"Name"} = $TypeInfo{$To}{"Name"}."*";
@@ -2451,7 +2450,7 @@ sub complete_ABI()
         }
     }
     
-    foreach my $Tid (keys(%Delete))
+    foreach my $Tid (keys(%DeletedAnon))
     {
         my $TN = $TypeInfo{$Tid}{"Name"};
         my $TT = $TypeInfo{$Tid}{"Type"};
@@ -2466,9 +2465,6 @@ sub complete_ABI()
         
         delete($TypeInfo{$Tid});
     }
-    
-    # free memory
-    %Delete = ();
     
     # symbols
     foreach my $ID (sort {int($a) <=> int($b)} keys(%SymbolInfo))
@@ -4513,6 +4509,10 @@ sub getFirst($)
         return $Tid;
     }
     
+    if(defined $DeletedAnon{$Tid}) {
+        $Tid = $DeletedAnon{$Tid};
+    }
+    
     if(defined $TypeSpec{$Tid}) {
         $Tid = $TypeSpec{$Tid};
     }
@@ -5831,6 +5831,16 @@ sub scenario()
                     if(defined $TypeToHeader{$TName}) {
                         $TypeInfo{$Tid}{"Header"} = $TypeToHeader{$TName};
                     }
+                    #elsif(index($TName, "::")!=-1)
+                    #{
+                    #    if($TName=~/::(.+?)\Z/)
+                    #    {
+                    #        if(defined $TypeToHeader{$1})
+                    #        {
+                    #            $TypeInfo{$Tid}{"Header"} = $TypeToHeader{$1};
+                    #        }
+                    #    }
+                    #}
                 }
             }
             
