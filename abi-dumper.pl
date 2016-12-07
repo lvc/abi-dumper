@@ -2197,7 +2197,14 @@ sub read_ABI()
         elsif($Kind eq "template_type_parameter"
         or $Kind eq "template_value_parameter")
         {
-            my %Info = ("type"=>$DWARF_Info{$ID}{"type"}, "key"=>$DWARF_Info{$ID}{"name"});
+            my %Info = ("key"=>$DWARF_Info{$ID}{"name"});
+            
+            if(defined $DWARF_Info{$ID}{"type"}) {
+                $Info{"type"} = $DWARF_Info{$ID}{"type"};
+            }
+            else { # void
+                $Info{"type"} = "1";
+            }
             
             if(defined $DWARF_Info{$ID}{"const_value"}) {
                 $Info{"value"} = $DWARF_Info{$ID}{"const_value"};
