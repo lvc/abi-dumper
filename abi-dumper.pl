@@ -59,6 +59,7 @@ my $EU_READELF = "eu-readelf";
 my $EU_READELF_L = $LOCALE." ".$EU_READELF;
 my $OBJDUMP = "objdump";
 my $CTAGS = "ctags";
+my $EXUBERANT_CTAGS = 0;
 my $GPP = "g++";
 
 my ($Help, $ShowVersion, $DumpVersion, $OutputDump, $SortDump, $StdOut,
@@ -67,7 +68,7 @@ $SkipCxx, $Loud, $AddrToName, $DumpStatic, $Compare, $AltDebugInfoOpt,
 $AddDirs, $VTDumperPath, $SymbolsListPath, $PublicHeadersPath,
 $IgnoreTagsPath, $KernelExport, $UseTU, $ReimplementStd,
 $IncludePreamble, $IncludePaths, $CacheHeaders, $MixedHeaders, $Debug,
-$SearchDirDebuginfo, $KeepRegsAndOffsets, $Quiet);
+$SearchDirDebuginfo, $KeepRegsAndOffsets, $Quiet, $IncludeDefines);
 
 my $CmdName = getFilename($0);
 
@@ -139,6 +140,7 @@ GetOptions("h|help!" => \$Help,
   "use-tu-dump!" => \$UseTU,
   "include-preamble=s" => \$IncludePreamble,
   "include-paths=s" => \$IncludePaths,
+  "include-defines=s" => \$IncludeDefines,
   "cache-headers=s" => \$CacheHeaders,
 # internal options
   "addr2name!" => \$AddrToName,
@@ -1439,16 +1441,30 @@ sub read_DWARF_Dump($$)
             {
                 if($Val=~/\)\s*\Z/)
                 { # value on the next line
-                    my $NL = "";
+                    my $NL1 = "";
                     
                     if($Import) {
-                        $NL = $ImportedUnit{$Import}{$Import_Num}
+                        $NL1 = $ImportedUnit{$Import}{$Import_Num}
                     }
                     else {
-                        $NL = <$FH>;
+                        $NL1 = <$FH>;
                     }
                     
-                    $Val .= $NL;
+                    $Val .= $NL1;
+                    
+                    if(index($Val, "GNU_entry_value")!=-1)
+                    { # value on the next line
+                        my $NL2 = "";
+                        
+                        if($Import) {
+                            $NL2 = $ImportedUnit{$Import}{++$Import_Num}
+                        }
+                        else {
+                            $NL2 = <$FH>;
+                        }
+                        
+                        $Val .= $NL2;
+                    }
                 }
                 
                 if($Val=~/\A\(\w+\)\s*(-?)(\w+)\Z/)
@@ -2948,9 +2964,6 @@ sub init_FuncType($$$)
     if($Type eq "FuncPtr") {
         $TInfo->{"Name"} .= "(*)";
     }
-    else {
-        $TInfo->{"Name"} .= "()";
-    }
     $TInfo->{"Name"} .= "(".join(",", @Prms).")";
 }
 
@@ -4379,8 +4392,18 @@ sub getSymbolInfo($)
         my %PInfo = %{$DWARF_Info{$ParamId}};
         
         if(defined $Offset
-        and not defined $IncompatibleOpt) {
-            $SInfo{"Param"}{$Pos}{"offset"} = $Offset;
+        and not defined $IncompatibleOpt)
+        {
+            if($SYS_ARCH eq "x86_64")
+            {
+                if($Offset<0) { # debug-info failure
+                    $Offset = undef;
+                }
+            }
+            
+            if(defined $Offset) {
+                $SInfo{"Param"}{$Pos}{"offset"} = "$Offset";
+            }
         }
         
         if($TypeInfo{$PInfo{"type"}}{"Type"} eq "Const")
@@ -4484,21 +4507,38 @@ sub chooseHeader($$)
 {
     my ($Symbol, $Source) = @_;
     
-    my @Headers = keys(%{$SymbolToHeader{$Symbol}});
+    my @Headers = sort keys(%{$SymbolToHeader{$Symbol}});
     
     if($#Headers==0) {
         return $Headers[0];
     }
     
+    @Headers = sort {length($a)<=>length($b)} sort {lc($a) cmp lc($b)} @Headers;
+    
     $Source=~s/\.\w+\Z//g;
+    
     foreach my $Header (@Headers)
     {
-        if($Header=~/\A\Q$Source\E(|\.[\w\+]+)\Z/) {
+        if($Header=~/\A\Q$Source\E(|\.[\w\+]+)\Z/i) {
             return $Header;
         }
     }
     
-    @Headers = sort {length($a)<=>length($b)} sort {lc($a) cmp lc($b)} @Headers;
+    my $SPrefix = undef;
+    
+    if(length($Source)>3) {
+        $SPrefix = substr($Source, 0, 3);
+    }
+    
+    if(defined $SPrefix)
+    {
+        foreach my $Header (@Headers)
+        {
+            if($Header=~/\A\Q$SPrefix\E/i) {
+                return $Header;
+            }
+        }
+    }
     
     return $Headers[0];
 }
@@ -5283,8 +5323,12 @@ sub detectPublicSymbols($)
         
         if(my $CtagsVer = `$CTAGS --version 2>&1`)
         {
-            if($CtagsVer!~/Universal/i) {
+            if($CtagsVer!~/Universal/i)
+            {
                 printMsg("ERROR", "requires Universal Ctags to work properly");
+                if($CtagsVer=~/Exuberant/i) {
+                    $EXUBERANT_CTAGS = 1;
+                }
             }
         }
     }
@@ -5345,6 +5389,23 @@ sub detectPublicSymbols($)
     
     my $Is_C = ($OBJ_LANG eq "C");
     
+    my @Langs = undef;
+    
+    if($EXUBERANT_CTAGS)
+    {
+        @Langs = ("C++");
+        if($Is_C) {
+            @Langs = ("C");
+        }
+    }
+    else
+    {
+        @Langs = ("C++", "OldC++");
+        if($Is_C) {
+            @Langs = ("C", "OldC");
+        }
+    }
+    
     foreach my $File (sort {length($b)<=>length($a)} sort {lc($b) cmp lc($a)} @Headers)
     {
         my $HName = getFilename($File);
@@ -5363,6 +5424,12 @@ sub detectPublicSymbols($)
             
             my $TmpInc = $TmpDir."/tmp-inc.h";
             my $TmpContent = "";
+            if($IncludeDefines)
+            {
+                foreach my $D (split(/;/, $IncludeDefines)) {
+                    $TmpContent = "#define $D\n";
+                }
+            }
             if($IncludePreamble)
             {
                 foreach my $P (split(/;/, $IncludePreamble))
@@ -5407,14 +5474,22 @@ sub detectPublicSymbols($)
             chdir($ORIG_DIR);
             
             my $TuDump = $TmpDir."/tmp-inc.h.001t.tu";
+            my $Errors = $TmpDir."/OUT";
             
             if(not -e $TuDump)
             {
                 printMsg("ERROR", "failed to list symbols in the header \'$HName\'");
+                if($Debug) {
+                    printMsg("ERROR", readFile($Errors));
+                }
                 next;
             }
-            elsif($?) {
+            elsif($?)
+            {
                 printMsg("ERROR", "some errors occured when compiling header \'$HName\'");
+                if($Debug) {
+                    printMsg("ERROR", readFile($Errors));
+                }
             }
             
             my (%Fdecl, %Tdecl, %Tname, %Ident, %NotDecl) = ();
@@ -5528,40 +5603,41 @@ sub detectPublicSymbols($)
                 $IgnoreTags = "-I \@".$IgnoreTagsPath;
             }
             
-            my $Lang = "--language-force=C++";
-            if($Is_C) {
-                $Lang = "--language-force=C";
-            }
-            
-            my $List_S = `$CTAGS -x --c-kinds=fpvx $Lang $IgnoreTags \"$File\"`;
-            foreach my $Line (split(/\n/, $List_S))
+            foreach my $Lang (@Langs)
             {
-                if($Line=~/\A(\w+)/) {
-                    $SymbolToHeader{$1}{$HName} = 1;
-                }
-                
-                if(not $Is_C)
+                my $List_S = `$CTAGS -x --$Lang-kinds=fpvx --languages=+$Lang --language-force=$Lang $IgnoreTags \"$File\"`;
+                foreach my $Line (split(/\n/, $List_S))
                 {
-                    if(index($Line, "operator ")==0)
+                    if($Line=~/\A(\w+)/) {
+                        $SymbolToHeader{$1}{$HName} = 1;
+                    }
+                    
+                    if(not $Is_C)
                     {
-                        if($Line=~/\A(operator .+?)\s+(prototype)/) {
-                            $SymbolToHeader{$1}{$HName} = 1;
+                        if(index($Line, "operator ")==0)
+                        {
+                            if($Line=~/\A(operator) (\w.*?)\s+(prototype)/) {
+                                $SymbolToHeader{$1." ".$2}{$HName} = 1;
+                            }
+                            elsif($Line=~/\A(operator) (\W.*?)\s+(prototype)/) {
+                                $SymbolToHeader{$1.$2}{$HName} = 1;
+                            }
                         }
                     }
                 }
-            }
-            
-            if($Is_C)
-            {
-                my $List_T = `$CTAGS -x --c-kinds=gstu $Lang $IgnoreTags \"$File\"`;
-                foreach my $Line (split(/\n/, $List_T))
+                
+                if($Is_C)
                 {
-                    if($Line=~/\A(\w+)/)
+                    my $List_T = `$CTAGS -x --$Lang-kinds=gstu --languages=+$Lang --language-force=$Lang $IgnoreTags \"$File\"`;
+                    foreach my $Line (split(/\n/, $List_T))
                     {
-                        my $N = $1;
-                        
-                        if($Line!~/\b$N\s+$N\b/) {
-                            $TypeToHeader{$N} = $HName;
+                        if($Line=~/\A(\w+)/)
+                        {
+                            my $N = $1;
+                            
+                            if($Line!~/\b$N\s+$N\b/) {
+                                $TypeToHeader{$N} = $HName;
+                            }
                         }
                     }
                 }
