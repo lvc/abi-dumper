@@ -422,8 +422,8 @@ my %ConstSuffix = (
     "long long" => "ll"
 );
 
-my $HEADER_EXT = "h|hh|hp|hxx|hpp|h\\+\\+|tcc|x|inl|ads";
-my $SRC_EXT = "c|cpp|cxx|c\\+\\+";
+my $HEADER_EXT = "h|hh|hp|hxx|hpp|h\\+\\+|tcc|x|inl|inc|ads";
+my $SRC_EXT = "c|cc|cp|cpp|cxx|c\\+\\+";
 
 # ELF
 my %Library_Symbol;
@@ -2524,6 +2524,8 @@ sub completeABI()
     # free memory
     %Incomplete = ();
     
+    my %ReplacedAnon = ();
+    
     foreach my $Tid (sort {$a<=>$b} keys(%TypeInfo))
     {
         if($TypeInfo{$Tid}{"Type"} eq "Typedef")
@@ -2534,11 +2536,14 @@ sub completeABI()
             
             if(my $BTid = $TypeInfo{$Tid}{"BaseType"})
             {
+                my $BName = $TypeInfo{$BTid}{"Name"};
+                my $BType = $TypeInfo{$BTid}{"Type"};
+                
                 if(defined $TypeInfo{$BTid}
-                and $TypeInfo{$BTid}{"Name"}=~/\Aanon\-(\w+)\-/
-                and $TypeInfo{$BTid}{"Type"}=~/Enum|Struct|Union/)
+                and $BName=~/\Aanon\-(\w+)\-/
+                and $BType=~/Enum|Struct|Union/)
                 {
-                    %{$TypeInfo{$Tid}} = %{$TypeInfo{$BTid}};
+                    $TypeInfo{$Tid} = dclone($TypeInfo{$BTid});
                     $TypeInfo{$Tid}{"Name"} = lc($TypeInfo{$BTid}{"Type"})." ".$TN;
                     $TypeInfo{$Tid}{"Line"} = $TL;
                     
@@ -2550,7 +2555,11 @@ sub completeABI()
                     if($NS) {
                         $TypeInfo{$Tid}{"NameSpace"} = $NS;
                     }
+                    
                     $DeletedAnon{$BTid} = $Tid;
+                    foreach my $BTid_S (keys(%{$TName_Tids{$BType}{$BName}})) {
+                        $DeletedAnon{$BTid_S} = $Tid;
+                    }
                 }
             }
         }
@@ -2558,7 +2567,16 @@ sub completeABI()
         {
             if(my $BTid = $TypeInfo{$Tid}{"BaseType"})
             {
-                if(my $To = $DeletedAnon{$BTid})
+                my $To = undef;
+                
+                if(defined $DeletedAnon{$BTid}) {
+                    $To = $DeletedAnon{$BTid};
+                }
+                elsif(defined $ReplacedAnon{$BTid}) {
+                    $To = $BTid;
+                }
+                
+                if($To)
                 {
                     $TypeInfo{$Tid}{"BaseType"} = $To;
                     $TypeInfo{$Tid}{"Name"} = $TypeInfo{$To}{"Name"}."*";
@@ -2568,6 +2586,36 @@ sub completeABI()
                     
                     $TName_Tid{$Type}{$Name} = $Tid;
                     $TName_Tids{$Type}{$Name}{$Tid} = 1;
+                    
+                    $ReplacedAnon{$Tid} = 1;
+                }
+            }
+        }
+        elsif($TypeInfo{$Tid}{"Type"} eq "Const")
+        {
+            if(my $BTid = $TypeInfo{$Tid}{"BaseType"})
+            {
+                my $To = undef;
+                
+                if(defined $DeletedAnon{$BTid}) {
+                    $To = $DeletedAnon{$BTid};
+                }
+                elsif(defined $ReplacedAnon{$BTid}) {
+                    $To = $BTid;
+                }
+                
+                if($To)
+                {
+                    $TypeInfo{$Tid}{"BaseType"} = $To;
+                    $TypeInfo{$Tid}{"Name"} = formatName($TypeInfo{$To}{"Name"}." const", "T");
+                    
+                    my $Name = $TypeInfo{$Tid}{"Name"};
+                    my $Type = $TypeInfo{$Tid}{"Type"};
+                    
+                    $TName_Tid{$Type}{$Name} = $Tid;
+                    $TName_Tids{$Type}{$Name}{$Tid} = 1;
+                    
+                    $ReplacedAnon{$Tid} = 1;
                 }
             }
         }
@@ -3209,13 +3257,14 @@ sub parseTParams($)
     if(my $Cent = findCenter($Name, "<"))
     {
         my $TParams = substr($Name, $Cent);
-        $TParams=~s/\A<|>\Z//g;
-        
-        $TParams = simpleName($TParams);
-        
         my $Short = substr($Name, 0, $Cent);
         
+        $TParams=~s/\A<|>\Z//g;
+        $TParams = simpleName($TParams);
+        
         my @Params = sepParams($TParams);
+        @Params = shortTParams($Short, \@Params);
+        
         my @TParams = ();
         foreach my $Pos (0 .. $#Params)
         {
@@ -3348,6 +3397,11 @@ sub getTypeInfo($)
         if($DWARF_Info{$ID}{"kind"} eq "subroutine_type") {
             $TInfo{"Type"} = "Func";
         }
+    }
+    
+    if($DWARF_Info{$ID}{"name"} eq "__unknown__")
+    { # size of such type may vary
+        delete($DWARF_Info{$ID}{"size"});
     }
     
     if(defined $SYS_CLANGV
@@ -4636,26 +4690,29 @@ sub getSymbolInfo($)
         }
     }
     
-    if(not $SInfo{"Header"}
-    or ($SInfo{"External"} and not defined $PublicHeader{$SInfo{"Header"}}))
+    if(defined $PublicHeadersPath)
     {
-        if($SInfo{"MnglName"} and defined $SymbolToHeader{$SInfo{"MnglName"}})
+        if(not $SInfo{"Header"}
+        or ($SInfo{"External"} and not defined $PublicHeader{$SInfo{"Header"}}))
         {
-            $SInfo{"Header"} = chooseHeader($SInfo{"MnglName"}, $SInfo{"Source"});
-            delete($SInfo{"Line"});
+            if($SInfo{"MnglName"} and defined $SymbolToHeader{$SInfo{"MnglName"}})
+            {
+                $SInfo{"Header"} = chooseHeader($SInfo{"MnglName"}, $SInfo{"Source"});
+                delete($SInfo{"Line"});
+            }
+            elsif(not $SInfo{"Class"}
+            and defined $SymbolToHeader{$SInfo{"ShortName"}})
+            {
+                $SInfo{"Header"} = chooseHeader($SInfo{"ShortName"}, $SInfo{"Source"});
+                delete($SInfo{"Line"});
+            }
         }
-        elsif(not $SInfo{"Class"}
-        and defined $SymbolToHeader{$SInfo{"ShortName"}})
+        
+        if($SInfo{"Alias"})
         {
-            $SInfo{"Header"} = chooseHeader($SInfo{"ShortName"}, $SInfo{"Source"});
-            delete($SInfo{"Line"});
-        }
-    }
-    
-    if($SInfo{"Alias"})
-    {
-        if(defined $SymbolToHeader{$SInfo{"Alias"}}) {
-            $SInfo{"Header"} = chooseHeader($SInfo{"Alias"}, $SInfo{"Source"});
+            if(defined $SymbolToHeader{$SInfo{"Alias"}}) {
+                $SInfo{"Header"} = chooseHeader($SInfo{"Alias"}, $SInfo{"Source"});
+            }
         }
     }
     
@@ -5689,7 +5746,7 @@ sub isHeader($)
         return 1;
     }
     
-    if(index(getFilename($Path), ".")==-1)
+    if(index(getFilename($Path), ".")==-1 and -T $Path)
     { # C++
         return 1;
     }
@@ -5806,7 +5863,9 @@ sub detectPublicSymbols($)
         }
     }
     
-    foreach my $File (sort {length($b)<=>length($a)} sort {lc($b) cmp lc($a)} @Headers)
+    @Headers = sort {length($b)<=>length($a)} sort {lc($b) cmp lc($a)} @Headers;
+    
+    foreach my $File (@Headers)
     {
         my $HName = getFilename($File);
         
@@ -6054,6 +6113,43 @@ sub detectPublicSymbols($)
                                 $TypeToHeader{$N} = $HName;
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+    
+    # We can't fully rely on the output of Ctags because it may
+    # miss some symbols intentionally (due to branches of code)
+    # or occasionally (due to complex macros).
+    if(not $UseTU)
+    {
+        foreach my $File (@Headers)
+        {
+            my $HName = getFilename($File);
+            my $Content = readFile($File);
+            
+            $Content=~s&/\*.+?\*/&&sg;
+            $Content=~s&(//|#define).*\n&\n&g;
+            
+            # Functions
+            my @Func = ($Content=~/([a-zA-Z]\w+)\s*\(/g);
+            foreach (@Func)
+            {
+                if(not defined $SymbolToHeader{$_}) {
+                    $SymbolToHeader{$_}{$HName} = 1;
+                }
+            }
+            
+            # Types
+            if($Is_C)
+            {
+                my @Type1 = ($Content=~/}\s*([a-zA-Z]\w+)\s*;/g);
+                my @Type2 = ($Content=~/([a-zA-Z]\w+)\s*{/g);
+                foreach (@Type1, @Type2)
+                {
+                    if(not defined $TypeToHeader{$_}) {
+                        $TypeToHeader{$_}{$HName} = 1;
                     }
                 }
             }
