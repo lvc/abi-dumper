@@ -2781,7 +2781,7 @@ sub selectPublicType($)
 {
     my $Tid = $_[0];
     
-    if($TypeInfo{$Tid}{"Type"}!~/\A(Struct|Class|Union|Enum)\Z/) {
+    if($TypeInfo{$Tid}{"Type"}!~/\A(Struct|Class|Union|Enum|Typedef)\Z/) {
         return 1;
     }
     
@@ -3331,6 +3331,16 @@ sub shortTParams($$)
             and $Params[2] eq "std::allocator<".$Params[0].">")
             { # std::basic_string<T, std::char_traits<T>, std::allocator<T> >
                 splice(@Params, 1, 2);
+            }
+        }
+    }
+    elsif($Short eq "std::basic_ostream")
+    {
+        if($#Params==1)
+        {
+            if($Params[1] eq "std::char_traits<".$Params[0].">")
+            { # std::basic_ostream<T, std::char_traits<T> >
+                splice(@Params, 1, 1);
             }
         }
     }
@@ -5216,6 +5226,12 @@ sub simpleName($)
         $N=~s/std::basic_string<char, std::char_traits<char>, std::allocator<char> >/std::string /g;
         $N=~s/std::basic_string<char, std::char_traits<char> >/std::string /g;
         $N=~s/std::basic_string<char>/std::string /g;
+        
+        $N=~s/std::basic_string<wchar_t, std::char_traits<wchar_t>, std::allocator<wchar_t> >/std::wstring /g;
+    }
+    
+    if(index($N, "std::basic_ostream")!=-1) {
+        $N=~s/std::basic_ostream<char, std::char_traits<char> >/std::ostream /g;
     }
     
     return formatName($N, "T");
