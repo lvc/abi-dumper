@@ -3559,7 +3559,8 @@ sub getTypeInfo($)
         }
     }
     
-    if(my $Size = $DWARF_Info{$ID}{"size"}) {
+    my $Size = $DWARF_Info{$ID}{"size"};
+    if($Size ne "") {
         $TInfo{"Size"} = $Size;
     }
     
@@ -6151,6 +6152,15 @@ sub detectPublicSymbols($)
             # Functions
             my @Func = ($Content=~/([a-zA-Z]\w+)\s*\(/g);
             foreach (@Func)
+            {
+                if(not defined $SymbolToHeader{$_}) {
+                    $SymbolToHeader{$_}{$HName} = 1;
+                }
+            }
+            
+            # Data
+            my @Data = ($Content=~/([a-zA-Z_]\w+)\s*;/gi);
+            foreach (@Data)
             {
                 if(not defined $SymbolToHeader{$_}) {
                     $SymbolToHeader{$_}{$HName} = 1;
