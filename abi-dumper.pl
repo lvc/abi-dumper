@@ -4995,19 +4995,18 @@ sub getFirst($)
         $Tid = $TypeSpec{$Tid};
     }
     
-    my $F = 0;
-    
     if(my $Name = $TypeInfo{$Tid}{"Name"})
     {
         my $Type = $TypeInfo{$Tid}{"Type"};
-        if($Name=~s/\Astruct //)
-        { # search for class or derived types (const, *, etc.)
-            $F = 1;
-        }
         
         my $FTid = undef;
-        if($F)
-        {
+        
+        if($FTid = $TName_Tid{$Type}{$Name}) {
+            return "$FTid";
+        }
+        
+        if($Name=~s/\Astruct //)
+        { # search for class or derived types (const, *, etc.)
             foreach my $Type ("Class", "Const", "Ref", "RvalueRef", "Pointer")
             {
                 if($FTid = $TName_Tid{$Type}{$Name})
