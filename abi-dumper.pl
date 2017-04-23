@@ -69,7 +69,7 @@ $AddDirs, $VTDumperPath, $SymbolsListPath, $PublicHeadersPath,
 $IgnoreTagsPath, @CtagsDef, $KernelExport, $UseTU, $ReimplementStd,
 $IncludePreamble, $IncludePaths, $CacheHeaders, $MixedHeaders, $Debug,
 $SearchDirDebuginfo, $KeepRegsAndOffsets, $Quiet, $IncludeDefines,
-$AllUnits);
+$AllUnits, $LambdaSupport);
 
 my $CmdName = getFilename($0);
 
@@ -145,6 +145,7 @@ GetOptions("h|help!" => \$Help,
   "include-paths=s" => \$IncludePaths,
   "include-defines=s" => \$IncludeDefines,
   "cache-headers=s" => \$CacheHeaders,
+  "lambda!" => \$LambdaSupport,
 # internal options
   "addr2name!" => \$AddrToName,
 # obsolete
@@ -312,6 +313,14 @@ EXTRA OPTIONS:
   
   -cache-headers DIR
       Cache headers analysis results to reuse later.
+  
+  -lambda
+      Enable support for lambda and checking of lexical
+      blocks. Define it if your C++ library API functions
+      use lambda expressions.
+      
+      By default lexical blocks are not analyzed to
+      improve performance.
 ";
 
 sub helpMsg() {
@@ -430,6 +439,7 @@ my %Library_Symbol;
 my %Library_UndefSymbol;
 my %Library_Needed;
 my %SymbolTable;
+my %Symbol_Bind;
 
 # Kernel
 my %KSymTab;
@@ -756,6 +766,8 @@ sub readSymbols($)
                         next;
                     }
                 }
+                
+                $Symbol_Bind{$Symbol} = $Bind;
                 
                 if($Bind ne "LOCAL") {
                     $Library_Symbol{$TargetName}{$Symbol} = ($Type eq "OBJECT")?-$Size:1;
@@ -1434,6 +1446,15 @@ sub readDWARFDump($$)
             elsif($Attr eq "name")
             {
                 $Val=~s/\A\([^()]*\)\s*\"(.*)\"\Z/$1/;
+                
+                if(defined $LambdaSupport)
+                {
+                    if(index($Val, "<lambda(")==0)
+                    {
+                        $Val=~s/\A</{/;
+                        $Val=~s/>\Z/}/;
+                    }
+                }
             }
             elsif(index($Attr, "linkage_name")!=-1 or $Attr eq "linkage")
             {
@@ -1685,8 +1706,11 @@ sub readDWARFDump($$)
                 {
                     if($NS>$Lexical_Block)
                     {
-                        $Skip_Block = 1;
-                        next;
+                        if(not $LambdaSupport)
+                        {
+                            $Skip_Block = 1;
+                            next;
+                        }
                     }
                     else
                     { # end of lexical block
@@ -2048,6 +2072,7 @@ sub readABI()
     
     my $TPack = undef;
     my $PPack = undef;
+    my $NS_Pre = undef;
     
     foreach my $ID (@IDs)
     {
@@ -2056,6 +2081,15 @@ sub readABI()
         my $Kind = $DWARF_Info{$ID}{"kind"};
         my $NS = $DWARF_Info{$ID}{"ns"};
         my $Scope = $CurID{$NS-2};
+        
+        if(defined $NS_Pre and $NS<=$NS_Pre)
+        {
+            foreach (0 .. $NS_Pre-$NS) {
+                delete($CurID{$NS+$_});
+            }
+        }
+        
+        $NS_Pre = $NS;
         
         if($Kind eq "typedef")
         {
@@ -3001,6 +3035,11 @@ sub formatName($$)
     }
     
     $N=~s/,/, /g;
+    
+    if(defined $LambdaSupport)
+    { # struct {lambda()}
+        $N=~s/(\w){/$1 {/g;
+    }
     
     return ($Cache{"formatName"}{$_[1]}{$_[0]} = $N);
 }
@@ -4545,8 +4584,12 @@ sub getSymbolInfo($)
     {
         if(my $InLine = $DWARF_Info{$ID}{"inline"})
         {
-            if(index($InLine, "declared_inlined")==0) {
-                $SInfo{"InLine"} = 1;
+            if(index($InLine, "declared_inlined")==0)
+            {
+                if(not defined $Symbol_Bind{$MnglName}
+                or $Symbol_Bind{$MnglName} ne "GLOBAL") {
+                    $SInfo{"InLine"} = 1;
+                }
             }
         }
     }
@@ -4905,27 +4948,68 @@ sub getSymbolInfo($)
         $Checked_Spec{$MnglName} = 1;
     }
     
-    foreach my $Attr (keys(%SInfo))
+    my $MixedSymbols = 0;
+    
+    if(defined $SInfo{"Param"}
+    and defined $SymbolInfo{$ID}
+    and defined $SymbolInfo{$ID}{"Param"})
     {
-        if(ref($SInfo{$Attr}) eq "HASH")
+        foreach my $K1 (keys(%{$SInfo{"Param"}}))
         {
-            foreach my $K1 (keys(%{$SInfo{$Attr}}))
+            if(defined $SymbolInfo{$ID}{"Param"}{$K1})
             {
-                if(ref($SInfo{$Attr}{$K1}) eq "HASH")
+                if($SInfo{"Param"}{$K1}{"type"} eq "-1"
+                and $SymbolInfo{$ID}{"Param"}{$K1}{"type"} ne "-1")
                 {
-                    foreach my $K2 (keys(%{$SInfo{$Attr}{$K1}}))
-                    {
-                        $SymbolInfo{$ID}{$Attr}{$K1}{$K2} = $SInfo{$Attr}{$K1}{$K2};
-                    }
-                }
-                else {
-                    $SymbolInfo{$ID}{$Attr}{$K1} = $SInfo{$Attr}{$K1};
+                    $MixedSymbols = 1;
+                    last;
                 }
             }
         }
-        else
+    }
+    
+    if(not $MixedSymbols)
+    {
+        foreach my $Attr (keys(%SInfo))
         {
-            $SymbolInfo{$ID}{$Attr} = $SInfo{$Attr};
+            if(ref($SInfo{$Attr}) eq "HASH")
+            {
+                my @Prms = keys(%{$SInfo{$Attr}});
+                
+                if($Attr eq "Param" and @Prms
+                and defined $SymbolInfo{$ID}
+                and defined $SymbolInfo{$ID}{$Attr})
+                {
+                    my $Clear = 0;
+                    
+                    if(keys(%{$SymbolInfo{$ID}{$Attr}})!=$#Prms+1)
+                    { # do not mix parameters of different symbols
+                        $Clear = 1;
+                    }
+                    
+                    if($Clear) {
+                        $SymbolInfo{$ID}{$Attr} = {};
+                    }
+                }
+                
+                foreach my $K1 (keys(%{$SInfo{$Attr}}))
+                {
+                    if(ref($SInfo{$Attr}{$K1}) eq "HASH")
+                    {
+                        foreach my $K2 (keys(%{$SInfo{$Attr}{$K1}}))
+                        {
+                            $SymbolInfo{$ID}{$Attr}{$K1}{$K2} = $SInfo{$Attr}{$K1}{$K2};
+                        }
+                    }
+                    else {
+                        $SymbolInfo{$ID}{$Attr}{$K1} = $SInfo{$Attr}{$K1};
+                    }
+                }
+            }
+            else
+            {
+                $SymbolInfo{$ID}{$Attr} = $SInfo{$Attr};
+            }
         }
     }
     
@@ -5350,6 +5434,9 @@ sub registerTypeUsage($)
                         }
                     }
                 }
+            }
+            if($TInfo{"Type"}=~/\A(Struct|Class|Union)\Z/)
+            {
                 foreach my $TPos (keys(%{$TInfo{"TParam"}}))
                 {
                     if(my $TTid = $TInfo{"TParam"}{$TPos}{"type"})
