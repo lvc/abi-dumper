@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 1.0 Beta
+# ABI Dumper 1.0
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013-2017 Andrey Ponomarenko's ABI Laboratory
@@ -69,7 +69,7 @@ $AddDirs, $VTDumperPath, $SymbolsListPath, $PublicHeadersPath,
 $IgnoreTagsPath, @CtagsDef, $KernelExport, $UseTU, $ReimplementStd,
 $IncludePreamble, $IncludePaths, $CacheHeaders, $MixedHeaders, $Debug,
 $SearchDirDebuginfo, $KeepRegsAndOffsets, $Quiet, $IncludeDefines,
-$AllUnits, $LambdaSupport);
+$AllUnits, $LambdaSupport, $LdLibraryPath);
 
 my $CmdName = getFilename($0);
 
@@ -146,6 +146,7 @@ GetOptions("h|help!" => \$Help,
   "include-defines=s" => \$IncludeDefines,
   "cache-headers=s" => \$CacheHeaders,
   "lambda!" => \$LambdaSupport,
+  "ld-library-path=s" => \$LdLibraryPath,
 # internal options
   "addr2name!" => \$AddrToName,
 # obsolete
@@ -318,6 +319,10 @@ EXTRA OPTIONS:
       Enable support for lambda and checking of lexical
       blocks. Define it if your C++ library API functions
       use lambda expressions.
+  
+  -ld-library-path PATHS
+      Specify paths to add to LD_LIBRARY_PATH variable before
+      executing vtable-dumper (separated by colon).
       
       By default lexical blocks are not analyzed to
       improve performance.
@@ -355,6 +360,7 @@ my %NestedNameSpaces;
 my %HeadersInfo;
 my %SourcesInfo;
 my %SymVer;
+my %LexicalId;
 
 # Reader (per compile unit)
 my %TypeMember;
@@ -431,7 +437,7 @@ my %ConstSuffix = (
     "long long" => "ll"
 );
 
-my $HEADER_EXT = "h|hh|hp|hxx|hpp|h\\+\\+|tcc|x|inl|inc|ads";
+my $HEADER_EXT = "h|hh|hp|hxx|hpp|h\\+\\+|tcc|txx|x|inl|inc|ads";
 my $SRC_EXT = "c|cc|cp|cpp|cxx|c\\+\\+";
 
 # ELF
@@ -459,6 +465,7 @@ my $OBJ_LANG;
 # Errors
 my $InvalidDebugLoc;
 my $IncompatibleOpt = undef;
+my $FKeepInLine = undef;
 
 # Public Headers
 my %SymbolToHeader;
@@ -730,7 +737,7 @@ sub readSymbols($)
                 }
                 if(not $AllSymbols)
                 { # do nothing with symtab
-                    #next;
+                    # next;
                 }
             }
             elsif(index($_, "'.symtab'")!=-1)
@@ -740,6 +747,14 @@ sub readSymbols($)
         }
         if(my ($Value, $Size, $Type, $Bind, $Vis, $Ndx, $Symbol) = readline_ELF($_))
         { # read ELF entry
+            $Symbol_Bind{$Symbol} = $Bind;
+            if(index($Symbol, '@'))
+            {
+                if($Symbol=~/\A(.+?)\@/) {
+                    $Symbol_Bind{$1} = $Bind;
+                }
+            }
+            
             if(not $symtab)
             { # dynsym
                 if(skipSymbol($Symbol)) {
@@ -767,14 +782,9 @@ sub readSymbols($)
                     }
                 }
                 
-                $Symbol_Bind{$Symbol} = $Bind;
-                
                 if($Bind ne "LOCAL") {
                     $Library_Symbol{$TargetName}{$Symbol} = ($Type eq "OBJECT")?-$Size:1;
                 }
-                
-                $Symbol_Value{$Symbol} = $Value;
-                $Value_Symbol{$Value}{$Symbol} = 1;
                 
                 if(not defined $OBJ_LANG)
                 {
@@ -784,7 +794,8 @@ sub readSymbols($)
                     }
                 }
             }
-            else
+            
+            if($Ndx ne "UNDEF" and $Value!~/\A0+\Z/)
             {
                 $Symbol_Value{$Symbol} = $Value;
                 $Value_Symbol{$Value}{$Symbol} = 1;
@@ -965,7 +976,6 @@ sub readAltInfo($)
     }
     
     readDWARFDump($INFO_fh, 0);
-    close($INFO_fh);
 }
 
 sub readDWARFInfo($)
@@ -1243,8 +1253,6 @@ sub readDWARFInfo($)
     
     readDWARFDump($INFO_fh, 1);
     
-    close($INFO_fh);
-    
     if(my $Err = readFile("$TMP_DIR/error"))
     { # eu-readelf: cannot get next DIE: invalid DWARF
         if($Err=~/invalid DWARF/i)
@@ -1394,6 +1402,7 @@ sub readDWARFDump($$)
             
             if(index($Val, "(flag")==0)
             { # artificial, external (on Fedora)
+              # flag_present
                 $Val = 1;
             }
             
@@ -1633,6 +1642,10 @@ sub readDWARFDump($$)
                                     $IncompatibleOpt = 1;
                                 }
                             }
+                            
+                            if(index($Val, "-fkeep-inline-functions")!=-1) {
+                                $FKeepInLine = 1;
+                            }
                         }
                     }
                 }
@@ -1696,7 +1709,15 @@ sub readDWARFDump($$)
             
             if($Kind eq "lexical_block")
             {
-                $Lexical_Block = $NS;
+                if(defined $Lexical_Block)
+                {
+                    if(length($NS)<=length($Lexical_Block)) {
+                        $Lexical_Block = $NS;
+                    }
+                }
+                else {
+                    $Lexical_Block = $NS;
+                }
                 $Skip_Block = 1;
                 next;
             }
@@ -1706,6 +1727,7 @@ sub readDWARFDump($$)
                 {
                     if($NS>$Lexical_Block)
                     {
+                        $LexicalId{$ID} = 1;
                         if(not $LambdaSupport)
                         {
                             $Skip_Block = 1;
@@ -1835,6 +1857,8 @@ sub readDWARFDump($$)
         }
     }
     
+    close($FH);
+    
     if($Primary and not defined $ID) {
         printMsg("ERROR", "the debuginfo looks empty or corrupted");
     }
@@ -1885,7 +1909,13 @@ sub readVtables($)
             $ExtraPath = $ExtraInfo."/v-tables";
         }
         
-        system("LD_LIBRARY_PATH=\"$Dir\" $VTABLE_DUMPER -mangled -demangled \"$Path\" >\"$ExtraPath\"");
+        my $LdPaths = $Dir;
+        
+        if(defined $LdLibraryPath) {
+            $LdPaths .= ":".$LdLibraryPath;
+        }
+        
+        system("LD_LIBRARY_PATH=\"$LdPaths\" $VTABLE_DUMPER -mangled -demangled \"$Path\" >\"$ExtraPath\"");
         
         my $Content = readFile($ExtraPath);
         foreach my $ClassInfo (split(/\n\n\n/, $Content))
@@ -2376,6 +2406,8 @@ sub readABI()
         %OrigElem = ();
         %ClassMethods = ();
         
+        %LexicalId = ();
+        
         $Cache{"getTypeInfo"} = {"1"=>1, "-1"=>1};
     }
     
@@ -2729,18 +2761,20 @@ sub completeABI()
     
     foreach my $ID (sort {$a<=>$b} keys(%SymbolInfo))
     {
-        my $Symbol = $SymbolInfo{$ID}{"MnglName"};
+        my $SInfo = $SymbolInfo{$ID};
+        my $Symbol = $SInfo->{"MnglName"};
+        my $Short = $SInfo->{"ShortName"};
         
         if(not $Symbol) {
-            $Symbol = $SymbolInfo{$ID}{"ShortName"};
+            $Symbol = $Short;
         }
         
         if($LIB_LANG eq "C++")
         {
-            if(not $SymbolInfo{$ID}{"MnglName"})
+            if(not $SInfo->{"MnglName"})
             {
-                if($SymbolInfo{$ID}{"Artificial"}
-                or index($SymbolInfo{$ID}{"ShortName"}, "~")==0)
+                if($SInfo->{"Artificial"}
+                or index($Short, "~")==0)
                 {
                     delete($SymbolInfo{$ID});
                     next;
@@ -2748,36 +2782,108 @@ sub completeABI()
             }
         }
         
-        if($SymbolInfo{$ID}{"Class"}
-        and not $SymbolInfo{$ID}{"Data"}
-        and not $SymbolInfo{$ID}{"Constructor"}
-        and not $SymbolInfo{$ID}{"Destructor"}
-        and not $SymbolInfo{$ID}{"Virt"}
-        and not $SymbolInfo{$ID}{"PureVirt"})
+        if($SInfo->{"Class"}
+        and not $SInfo->{"Data"}
+        and not $SInfo->{"Constructor"}
+        and not $SInfo->{"Destructor"}
+        and not $SInfo->{"Virt"}
+        and not $SInfo->{"PureVirt"})
         {
-            if(not defined $SymbolInfo{$ID}{"Param"}
-            or $SymbolInfo{$ID}{"Param"}{0}{"name"} ne "this")
+            if(not defined $SInfo->{"Param"}
+            or $SInfo->{"Param"}{0}{"name"} ne "this")
             {
-                $SymbolInfo{$ID}{"Static"} = 1;
+                $SInfo->{"Static"} = 1;
             }
         }
         
-        if(not $SymbolInfo{$ID}{"Return"})
+        if(not $SInfo->{"Return"})
         { # void
-            if(not $SymbolInfo{$ID}{"Constructor"}
-            and not $SymbolInfo{$ID}{"Destructor"})
+            if(not $SInfo->{"Constructor"}
+            and not $SInfo->{"Destructor"})
             {
-                $SymbolInfo{$ID}{"Return"} = "1";
+                $SInfo->{"Return"} = "1";
             }
         }
         
-        if(defined $SymbolInfo{$ID}{"Source"} and defined $SymbolInfo{$ID}{"SourceLine"})
+        if(not $SInfo->{"Header"})
         {
-            if(not defined $SymbolInfo{$ID}{"Header"} and not defined $SymbolInfo{$ID}{"Line"})
-            {
-                $SymbolInfo{$ID}{"Line"} = $SymbolInfo{$ID}{"SourceLine"};
-                delete($SymbolInfo{$ID}{"SourceLine"});
+            if($SInfo->{"Class"})
+            { # detect missed header by class
+                if(defined $TypeInfo{$SInfo->{"Class"}}{"Header"}) {
+                    $SInfo->{"Header"} = $TypeInfo{$SInfo->{"Class"}}{"Header"};
+                }
             }
+        }
+        
+        if(defined $PublicHeadersPath) {
+            fixHeader($SInfo);
+        }
+        
+        my $Header = $SInfo->{"Header"};
+        
+        if(defined $SInfo->{"Source"} and defined $SInfo->{"SourceLine"})
+        {
+            if(not defined $Header and not defined $SInfo->{"Line"})
+            {
+                $SInfo->{"Line"} = $SInfo->{"SourceLine"};
+                delete($SInfo->{"SourceLine"});
+            }
+        }
+        
+        if(not $SInfo->{"Constructor"}
+        and not $SInfo->{"Destructor"})
+        {
+            my $InLineDecl = delete($SInfo->{"DeclaredInlined"});
+            
+            my $Bind = undef;
+            
+            if(defined $Symbol_Bind{$Symbol}) {
+                $Bind = $Symbol_Bind{$Symbol};
+            }
+            elsif(my $SVer = $SymVer{$Symbol})
+            {
+                if(defined $Symbol_Bind{$SVer}) {
+                    $Bind = $Symbol_Bind{$SVer};
+                }
+            }
+            
+            if(defined $PublicHeadersPath)
+            {
+                my $BodyDecl_H = 0;
+                
+                if($Short and defined $Header and defined $SymbolToHeader{$Short}
+                and defined $SymbolToHeader{$Short}{$Header}
+                and $SymbolToHeader{$Short}{$Header} eq "function") {
+                    $BodyDecl_H = 1;
+                }
+                
+                if($Bind ne "GLOBAL")
+                {
+                    if($InLineDecl) {
+                        $SInfo->{"InLine"} = 1;
+                    }
+                    elsif($BodyDecl_H) {
+                        $SInfo->{"InLine"} = 2;
+                    }
+                }
+            }
+            else
+            { # Not enough info in the DWARF dump
+              # False positives are possible
+                if((not $FKeepInLine and not defined $Bind) or $Bind eq "WEAK")
+                {
+                    if($InLineDecl) {
+                        $SInfo->{"InLine"} = 1;
+                    }
+                    else {
+                        $SInfo->{"InLine"} = 2;
+                    }
+                }
+            }
+        }
+        
+        if(defined $SInfo->{"PureVirt"}) {
+            delete($SInfo->{"InLine"});
         }
     }
 }
@@ -4326,6 +4432,22 @@ sub getSymbolInfo($)
         }
     }
     
+    my $Orig = $DWARF_Info{$ID}{"orig"};
+    my $Container = undef;
+    
+    if(defined $DWARF_Info{$ID}{"container"}) {
+        $Container = $DWARF_Info{$ID}{"container"};
+    }
+    elsif(defined $DWARF_Info{$Orig}{"container"}) {
+        $Container = $DWARF_Info{$Orig}{"container"};
+    }
+    
+    if(defined $Container
+    and defined $LexicalId{$Container})
+    { # local functions
+        return;
+    }
+    
     if(my $Loc = $DWARF_Info{$ID}{"location"})
     {
         if($Loc=~/ reg\d+\Z/)
@@ -4392,8 +4514,6 @@ sub getSymbolInfo($)
     if(skipSymbol($MnglName)) {
         return;
     }
-    
-    my $Orig = $DWARF_Info{$ID}{"orig"};
     
     my %SInfo = ();
     
@@ -4584,12 +4704,8 @@ sub getSymbolInfo($)
     {
         if(my $InLine = $DWARF_Info{$ID}{"inline"})
         {
-            if(index($InLine, "declared_inlined")==0)
-            {
-                if(not defined $Symbol_Bind{$MnglName}
-                or $Symbol_Bind{$MnglName} ne "GLOBAL") {
-                    $SInfo{"InLine"} = 1;
-                }
+            if(index($InLine, "declared_inlined")==0) {
+                $SInfo{"DeclaredInlined"} = 1;
             }
         }
     }
@@ -4744,32 +4860,6 @@ sub getSymbolInfo($)
         }
     }
     
-    if(defined $PublicHeadersPath)
-    {
-        if(not $SInfo{"Header"}
-        or ($SInfo{"External"} and not defined $PublicHeader{$SInfo{"Header"}}))
-        {
-            if($SInfo{"MnglName"} and defined $SymbolToHeader{$SInfo{"MnglName"}})
-            {
-                $SInfo{"Header"} = chooseHeader($SInfo{"MnglName"}, $SInfo{"Source"});
-                delete($SInfo{"Line"});
-            }
-            elsif(not $SInfo{"Class"}
-            and defined $SymbolToHeader{$SInfo{"ShortName"}})
-            {
-                $SInfo{"Header"} = chooseHeader($SInfo{"ShortName"}, $SInfo{"Source"});
-                delete($SInfo{"Line"});
-            }
-        }
-        
-        if($SInfo{"Alias"})
-        {
-            if(defined $SymbolToHeader{$SInfo{"Alias"}}) {
-                $SInfo{"Header"} = chooseHeader($SInfo{"Alias"}, $SInfo{"Source"});
-            }
-        }
-    }
-    
     my $PPos = 0;
     
     foreach my $Pos (sort {$a<=>$b} keys(%{$FuncParam{$ID}}))
@@ -4814,6 +4904,12 @@ sub getSymbolInfo($)
         
         if(my $OrigP = $DWARF_Info{$ParamId}{"orig"}) {
             $ParamId = $OrigP;
+        }
+        
+        if(not defined $DWARF_Info{$ParamId})
+        { # this is probably a lexical block
+            printMsg("ERROR", "incomplete info for symbol $ID");
+            return;
         }
         
         my %PInfo = %{$DWARF_Info{$ParamId}};
@@ -5015,6 +5111,34 @@ sub getSymbolInfo($)
     
     if($ID>$GLOBAL_ID) {
         $GLOBAL_ID = $ID;
+    }
+}
+
+sub fixHeader($)
+{
+    my $SInfo = $_[0];
+    
+    if(not $SInfo->{"Header"}
+    or ($SInfo->{"External"} and not defined $PublicHeader{$SInfo->{"Header"}}))
+    {
+        if($SInfo->{"MnglName"} and defined $SymbolToHeader{$SInfo->{"MnglName"}})
+        {
+            $SInfo->{"Header"} = chooseHeader($SInfo->{"MnglName"}, $SInfo->{"Source"});
+            delete($SInfo->{"Line"});
+        }
+        elsif(not $SInfo->{"Class"}
+        and defined $SymbolToHeader{$SInfo->{"ShortName"}})
+        {
+            $SInfo->{"Header"} = chooseHeader($SInfo->{"ShortName"}, $SInfo->{"Source"});
+            delete($SInfo->{"Line"});
+        }
+    }
+    
+    if($SInfo->{"Alias"})
+    {
+        if(defined $SymbolToHeader{$SInfo->{"Alias"}}) {
+            $SInfo->{"Header"} = chooseHeader($SInfo->{"Alias"}, $SInfo->{"Source"});
+        }
     }
 }
 
@@ -5921,6 +6045,10 @@ sub detectPublicSymbols($)
         }
     }
     
+    if(not @Headers) {
+        exitStatus("Error", "headers not found in \'$Path\'");
+    }
+    
     my $PublicHeader_F = $CacheHeaders."/PublicHeader.data";
     my $SymbolToHeader_F = $CacheHeaders."/SymbolToHeader.data";
     my $TypeToHeader_F = $CacheHeaders."/TypeToHeader.data";
@@ -6177,15 +6305,14 @@ sub detectPublicSymbols($)
                 my $List_S = `$CTAGS -x --$Lang-kinds=fpvxd --languages=+$Lang --language-force=$Lang $IgnoreTags \"$File\"`;
                 foreach my $Line (split(/\n/, $List_S))
                 {
-                    if($Line=~/\A(\w+)/) {
-                        $SymbolToHeader{$1}{$HName} = 1;
+                    if($Line=~/\A(\w+)\s+(\w+)/) {
+                        $SymbolToHeader{$1}{$HName} = $2;
                     }
                     
                     if(index($Line, " macro ")!=-1)
                     {
-                        if($Line=~/#define\s+(\w+)\s+(\w+)\Z/)
-                        {
-                            $SymbolToHeader{$2}{$HName} = 1;
+                        if($Line=~/#define\s+(\w+)\s+(\w+)\Z/) {
+                            $SymbolToHeader{$2}{$HName} = "prototype";
                         }
                     }
                     
@@ -6193,11 +6320,11 @@ sub detectPublicSymbols($)
                     {
                         if(index($Line, "operator ")==0)
                         {
-                            if($Line=~/\A(operator) (\w.*?)\s+(prototype)/) {
-                                $SymbolToHeader{$1." ".$2}{$HName} = 1;
+                            if($Line=~/\A(operator) (\w.*?)\s+(prototype|function)/) {
+                                $SymbolToHeader{$1." ".$2}{$HName} = $3;
                             }
-                            elsif($Line=~/\A(operator) (\W.*?)\s+(prototype)/) {
-                                $SymbolToHeader{$1.$2}{$HName} = 1;
+                            elsif($Line=~/\A(operator) (\W.*?)\s+(prototype|function)/) {
+                                $SymbolToHeader{$1.$2}{$HName} = $3;
                             }
                         }
                     }
@@ -6240,7 +6367,7 @@ sub detectPublicSymbols($)
             foreach (@Func)
             {
                 if(not defined $SymbolToHeader{$_}) {
-                    $SymbolToHeader{$_}{$HName} = 1;
+                    $SymbolToHeader{$_}{$HName} = "prototype";
                 }
             }
             
@@ -6249,7 +6376,7 @@ sub detectPublicSymbols($)
             foreach (@Data)
             {
                 if(not defined $SymbolToHeader{$_}) {
-                    $SymbolToHeader{$_}{$HName} = 1;
+                    $SymbolToHeader{$_}{$HName} = "prototype";
                 }
             }
             
@@ -6549,8 +6676,7 @@ sub scenario()
                 }
             }
             
-            if(not selectPublicType($Tid))
-            {
+            if(not selectPublicType($Tid)) {
                 $TypeInfo{$Tid}{"PrivateABI"} = 1;
             }
         }
