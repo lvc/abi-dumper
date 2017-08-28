@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 1.0
+# ABI Dumper 1.1
 # Dump ABI of an ELF object containing DWARF debug info
 #
 # Copyright (C) 2013-2017 Andrey Ponomarenko's ABI Laboratory
@@ -46,8 +46,8 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "1.0";
-my $ABI_DUMP_VERSION = "3.4";
+my $TOOL_VERSION = "1.1";
+my $ABI_DUMP_VERSION = "3.5";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
 
@@ -476,6 +476,9 @@ my $PublicSymbols_Detected;
 # Filter
 my %SymbolsList;
 
+# Dump
+my $COMPRESS = "tar.gz";
+
 sub printMsg($$)
 {
     my ($Type, $Msg) = @_;
@@ -555,6 +558,10 @@ sub getDirname($)
         return $1;
     }
     return "";
+}
+
+sub sepPath($) {
+    return (getDirname($_[0]), getFilename($_[0]));
 }
 
 sub checkCmd($)
@@ -1952,6 +1959,34 @@ sub readVtables($)
     }
 }
 
+sub createArchive($$)
+{
+    my ($Path, $To) = @_;
+    if(not $To) {
+        $To = ".";
+    }
+    
+    if(not checkCmd("tar")) {
+        exitStatus("Not_Found", "can't find \"tar\"");
+    }
+    if(not checkCmd("gzip")) {
+        exitStatus("Not_Found", "can't find \"gzip\"");
+    }
+    
+    my ($From, $Name) = sepPath($Path);
+    my $Pkg = abs_path($To)."/".$Name.".".$COMPRESS;
+    if(-e $Pkg) {
+        unlink($Pkg);
+    }
+    system("tar", "-C", $From, "-czf", $Pkg, $Name);
+    if($?)
+    { # cannot allocate memory (or other problems with "tar")
+        exitStatus("Error", "can't pack the ABI dump: ".$!);
+    }
+    unlink($Path);
+    return $To."/".$Name.".".$COMPRESS;
+}
+
 sub createABIFile()
 {
     printMsg("INFO", "Creating ABI dump");
@@ -2002,13 +2037,33 @@ sub createABIFile()
     }
     else
     {
-        mkpath(getDirname($OutputDump));
+        my $DumpPath = "ABI.dump";
+        if($OutputDump)
+        { # user defined path
+            $DumpPath = $OutputDump;
+        }
+        my $Archive = ($DumpPath=~s/\Q.$COMPRESS\E\Z//g);
+        my ($DDir, $DName) = sepPath($DumpPath);
         
-        open(DUMP, ">", $OutputDump) || die ("can't open file \'$OutputDump\': $!\n");
+        my $DPath = $TMP_DIR."/".$DName;
+        if(not $Archive) {
+            $DPath = $DumpPath;
+        }
+        
+        mkpath($DDir);
+        
+        open(DUMP, ">", $DPath) || die ("can't open file \'$DumpPath\': $!\n");
         print DUMP Dumper(\%ABI);
         close(DUMP);
         
-        printMsg("INFO", "\nThe object ABI has been dumped to:\n  $OutputDump");
+        if(not -s $DPath) {
+            exitStatus("Error", "can't create ABI dump because something is going wrong with the Data::Dumper module");
+        }
+        if($Archive) {
+            $DumpPath = createArchive($DPath, $DDir);
+        }
+        
+        printMsg("INFO", "\nThe object ABI has been dumped to:\n  $DumpPath");
     }
 }
 
@@ -2847,30 +2902,10 @@ sub completeABI()
                 }
             }
             
-            if(defined $PublicHeadersPath)
+            if($Bind ne "GLOBAL" and $Bind ne "LOCAL")
             {
-                my $BodyDecl_H = 0;
-                
-                if($Short and defined $Header and defined $SymbolToHeader{$Short}
-                and defined $SymbolToHeader{$Short}{$Header}
-                and $SymbolToHeader{$Short}{$Header} eq "function") {
-                    $BodyDecl_H = 1;
-                }
-                
-                if($Bind ne "GLOBAL")
-                {
-                    if($InLineDecl) {
-                        $SInfo->{"InLine"} = 1;
-                    }
-                    elsif($BodyDecl_H) {
-                        $SInfo->{"InLine"} = 2;
-                    }
-                }
-            }
-            else
-            { # Not enough info in the DWARF dump
-              # False positives are possible
-                if((not $FKeepInLine and not defined $Bind) or $Bind eq "WEAK")
+                # Not enough info in the DWARF dump
+                if($Bind eq "WEAK")
                 {
                     if($InLineDecl) {
                         $SInfo->{"InLine"} = 1;
@@ -2879,6 +2914,24 @@ sub completeABI()
                         $SInfo->{"InLine"} = 2;
                     }
                 }
+                
+                #if(not $SInfo->{"InLine"})
+                #{
+                #    if(defined $PublicHeadersPath)
+                #    {
+                #        if($Short and defined $Header
+                #        and defined $PublicHeader{$Header})
+                #        {
+                #            if(defined $SymbolToHeader{$Short}
+                #            and defined $SymbolToHeader{$Short}{$Header})
+                #            {
+                #                if($SymbolToHeader{$Short}{$Header} eq "function") {
+                #                    $SInfo->{"InLine"} = 2;
+                #                }
+                #            }
+                #        }
+                #    }
+                #}
             }
         }
         
@@ -5020,8 +5073,18 @@ sub getSymbolInfo($)
         {
             if($MnglName and index($MnglName, "_Z")!=0)
             {
-                if(keys(%{$SInfo{"Param"}})!=keys(%{$SymbolInfo{$BASE_ID}{"Param"}}))
+                my $DifferentParams = (keys(%{$SInfo{"Param"}})!=keys(%{$SymbolInfo{$BASE_ID}{"Param"}}));
+                if($DifferentParams or keys(%{$SInfo{"Param"}})==1)
                 { # different symbols with the same name
+                    if(defined $SInfo{"Param"}
+                    and $SInfo{"Param"}{0}{"type"}=="-1")
+                    { # missed signature (...)
+                        return;
+                    }
+                }
+                
+                if($DifferentParams)
+                { # take the last one
                     delete($SymbolInfo{$BASE_ID});
                 }
             }
@@ -6366,7 +6429,7 @@ sub detectPublicSymbols($)
             my @Func = ($Content=~/([a-zA-Z]\w+)\s*\(/g);
             foreach (@Func)
             {
-                if(not defined $SymbolToHeader{$_}) {
+                if(not defined $SymbolToHeader{$_} or not defined $SymbolToHeader{$_}{$HName}) {
                     $SymbolToHeader{$_}{$HName} = "prototype";
                 }
             }
@@ -6375,7 +6438,7 @@ sub detectPublicSymbols($)
             my @Data = ($Content=~/([a-zA-Z_]\w+)\s*;/gi);
             foreach (@Data)
             {
-                if(not defined $SymbolToHeader{$_}) {
+                if(not defined $SymbolToHeader{$_} or not defined $SymbolToHeader{$_}{$HName}) {
                     $SymbolToHeader{$_}{$HName} = "prototype";
                 }
             }
@@ -6387,7 +6450,7 @@ sub detectPublicSymbols($)
                 my @Type2 = ($Content=~/([a-zA-Z]\w+)\s*{/g);
                 foreach (@Type1, @Type2)
                 {
-                    if(not defined $TypeToHeader{$_}) {
+                    if(not defined $TypeToHeader{$_} or not defined $TypeToHeader{$_}{$HName}) {
                         $TypeToHeader{$_}{$HName} = 1;
                     }
                 }
