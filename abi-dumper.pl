@@ -6670,6 +6670,10 @@ sub scenario()
     
     foreach my $Obj (@ARGV)
     {
+        if($Obj=~/\.a\Z/) {
+            exitStatus("Error", "analysis of static libraries is not supported, please dump ABIs of individual objects in the archive or compile a shared library");
+        }
+        
         if(not $TargetName)
         {
             $TargetName = getFilename(realpath($Obj));
