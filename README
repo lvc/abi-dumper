@@ -1,4 +1,4 @@
-ABI Dumper 1.0
+ABI Dumper 1.1
 ==============
 
 NAME:
@@ -41,7 +41,7 @@ ABI CHECK:
   abi-compliance-checker -l libTest -old ABIv0.dump -new ABIv1.dump
 
 COMPATIBILITY:
-  ABI Compliance Checker >= 1.99.24 (https://github.com/lvc/abi-compliance-checker)
+  ABI Compliance Checker >= 2.2 (https://github.com/lvc/abi-compliance-checker)
 
 ADV. USAGE:
   For advanced usage, see output of --help option.

@@ -22,7 +22,7 @@
 #
 # COMPATIBILITY
 # =============
-#  ABI Compliance Checker >= 1.99.24
+#  ABI Compliance Checker >= 2.2
 #
 #
 # This program is free software: you can redistribute it and/or modify
