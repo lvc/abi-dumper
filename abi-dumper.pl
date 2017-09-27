@@ -3197,7 +3197,7 @@ sub formatName($$)
     
     if(defined $LambdaSupport)
     { # struct {lambda()}
-        $N=~s/(\w){/$1 {/g;
+        $N=~s/(\w)\{/$1 \{/g;
     }
     
     return ($Cache{"formatName"}{$_[1]}{$_[0]} = $N);
