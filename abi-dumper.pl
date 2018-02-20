@@ -3,7 +3,7 @@
 # ABI Dumper 1.1
 # Dump ABI of an ELF object containing DWARF debug info
 #
-# Copyright (C) 2013-2017 Andrey Ponomarenko's ABI Laboratory
+# Copyright (C) 2013-2018 Andrey Ponomarenko's ABI Laboratory
 #
 # Written by Andrey Ponomarenko
 #
@@ -24,19 +24,20 @@
 # =============
 #  ABI Compliance Checker >= 2.2
 #
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2.1 of the License, or (at your option) any later version.
 #
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License or the GNU Lesser
-# General Public License as published by the Free Software Foundation.
-#
-# This program is distributed in the hope that it will be useful,
+# This library is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
 #
-# You should have received a copy of the GNU General Public License
-# and the GNU Lesser General Public License along with this program.
-# If not, see <http://www.gnu.org/licenses/>.
+# You should have received a copy of the GNU Lesser General Public
+# License along with this library; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+# MA  02110-1301 USA
 ###########################################################################
 use Getopt::Long;
 Getopt::Long::Configure ("posix_default", "no_ignore_case", "permute");
@@ -92,8 +93,8 @@ my %ERROR_CODE = (
 
 my $ShortUsage = "ABI Dumper $TOOL_VERSION
 Dump ABI of an ELF object containing DWARF debug info
-Copyright (C) 2017 Andrey Ponomarenko's ABI Laboratory
-License: GNU LGPL or GNU GPL
+Copyright (C) 2018 Andrey Ponomarenko's ABI Laboratory
+License: GNU LGPL 2.1
 
 Usage: $CmdName [options] [object]
 Example:
@@ -172,7 +173,7 @@ DESCRIPTION:
   tracking ABI changes of a C/C++ library or kernel module.
 
   This tool is free software: you can redistribute it and/or modify it
-  under the terms of the GNU LGPL or GNU GPL.
+  under the terms of the GNU LGPL 2.1.
 
 USAGE:
   $CmdName [options] [object]
@@ -472,6 +473,7 @@ my %SymbolToHeader;
 my %TypeToHeader;
 my %PublicHeader;
 my $PublicSymbols_Detected;
+my $PublicHeadersIsDir = 1;
 
 # Filter
 my %SymbolsList;
@@ -6086,11 +6088,7 @@ sub detectPublicSymbols($)
     my @Headers = ();
     my @DefaultInc = ();
     
-    if(-f $Path)
-    { # list of headers
-        @Headers = split(/\n/, readFile($Path));
-    }
-    elsif(-d $Path)
+    if($PublicHeadersIsDir)
     { # directory
         @Files = findFiles($Path, "f");
         
@@ -6106,6 +6104,10 @@ sub detectPublicSymbols($)
         if(-d $Path_A."/include") {
             push(@DefaultInc, $Path_A."/include");
         }
+    }
+    else
+    { # list of headers
+        @Headers = split(/\n/, readFile($Path));
     }
     
     if(not @Headers) {
@@ -6504,8 +6506,8 @@ sub scenario()
     if($ShowVersion)
     {
         printMsg("INFO", "ABI Dumper $TOOL_VERSION");
-        printMsg("INFO", "Copyright (C) 2017 Andrey Ponomarenko's ABI Laboratory");
-        printMsg("INFO", "License: LGPL or GPL <http://www.gnu.org/licenses/>");
+        printMsg("INFO", "Copyright (C) 2018 Andrey Ponomarenko's ABI Laboratory");
+        printMsg("INFO", "License: GNU LGPL 2.1 <http://www.gnu.org/licenses/>");
         printMsg("INFO", "This program is free software: you can redistribute it and/or modify it.\n");
         printMsg("INFO", "Written by Andrey Ponomarenko.");
         exit(0);
@@ -6535,9 +6537,11 @@ sub scenario()
             exitStatus("Access_Error", "can't access \'$PublicHeadersPath\'");
         }
         
+        $PublicHeadersIsDir = (-d $PublicHeadersPath);
+        
         foreach my $P (split(/;/, $IncludePaths))
         {
-            if($P!~/\A\//) {
+            if($PublicHeadersIsDir and $P!~/\A\//) {
                 $P = $PublicHeadersPath."/".$P;
             }
             
