@@ -48,6 +48,19 @@ Input objects should be compiled with `-g -Og` additional options to contain DWA
     abi-dumper lib/libssh.so.3
     abi-dumper drm/nouveau/nouveau.ko.debug
 
+###### Docker
+
+You can try Docker image if the tool is not packaged for your Linux distribution (example for Harfbuzz):
+
+    FROM ebraminio/abi-dumper
+    RUN apt update && \
+        apt install -y ragel cpanminus && \
+        git clone https://github.com/harfbuzz/harfbuzz && cd harfbuzz && \
+            CFLAGS="-Og -g" CXXFLAGS="-Og -g" ./autogen.sh && make && cd .. && \
+        abi-dumper `find . -name 'libharfbuzz.so.0.*'` && \
+        cpanm JSON && \
+        perl -le 'use JSON; print to_json(do shift, {canonical => 1, pretty => 1});' ./ABI.dump > ABI.json
+
 ###### Adv. usage
 
   For advanced usage, see output of `--help` option.
