@@ -438,7 +438,7 @@ my %ConstSuffix = (
     "long long" => "ll"
 );
 
-my $HEADER_EXT = "h|hh|hp|hxx|hpp|h\\+\\+|tcc|txx|x|inl|inc|ads";
+my $HEADER_EXT = "h|hh|hp|hxx|hpp|h\\+\\+|tcc|txx|x|inl|inc|ads|isph";
 my $SRC_EXT = "c|cc|cp|cpp|cxx|c\\+\\+";
 
 # ELF
@@ -6628,7 +6628,7 @@ sub scenario()
         exit(0);
     }
     
-    if(not $TargetVersion) {
+    if($TargetVersion eq "") {
         printMsg("WARNING", "module version is not specified (-lver NUM)");
     }
     
