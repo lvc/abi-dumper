@@ -3,7 +3,7 @@
 # ABI Dumper 1.1
 # Dump ABI of an ELF object containing DWARF debug info
 #
-# Copyright (C) 2013-2018 Andrey Ponomarenko's ABI Laboratory
+# Copyright (C) 2013-2019 Andrey Ponomarenko's ABI Laboratory
 #
 # Written by Andrey Ponomarenko
 #
@@ -93,7 +93,7 @@ my %ERROR_CODE = (
 
 my $ShortUsage = "ABI Dumper $TOOL_VERSION
 Dump ABI of an ELF object containing DWARF debug info
-Copyright (C) 2018 Andrey Ponomarenko's ABI Laboratory
+Copyright (C) 2019 Andrey Ponomarenko's ABI Laboratory
 License: GNU LGPL 2.1
 
 Usage: $CmdName [options] [object]
@@ -4278,6 +4278,11 @@ sub setSource(@)
     
     if(defined $File)
     {
+        if(index($File, "(")!=-1)
+        { # Support for new elfutils (Fedora 30)
+            $File=~s/.+ \((\d+)\)/$1/;
+        }
+        
         my $Name = undef;
         
         if($ID>=0) {
@@ -6506,7 +6511,7 @@ sub scenario()
     if($ShowVersion)
     {
         printMsg("INFO", "ABI Dumper $TOOL_VERSION");
-        printMsg("INFO", "Copyright (C) 2018 Andrey Ponomarenko's ABI Laboratory");
+        printMsg("INFO", "Copyright (C) 2019 Andrey Ponomarenko's ABI Laboratory");
         printMsg("INFO", "License: GNU LGPL 2.1 <http://www.gnu.org/licenses/>");
         printMsg("INFO", "This program is free software: you can redistribute it and/or modify it.\n");
         printMsg("INFO", "Written by Andrey Ponomarenko.");
