@@ -1,9 +1,9 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 1.1
+# ABI Dumper 1.2
 # Dump ABI of an ELF object containing DWARF debug info
 #
-# Copyright (C) 2013-2019 Andrey Ponomarenko's ABI Laboratory
+# Copyright (C) 2013-2020 Andrey Ponomarenko's ABI Laboratory
 #
 # Written by Andrey Ponomarenko
 #
@@ -47,7 +47,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "1.1";
+my $TOOL_VERSION = "1.2";
 my $ABI_DUMP_VERSION = "3.5";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
