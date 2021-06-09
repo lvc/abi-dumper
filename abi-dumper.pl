@@ -1493,9 +1493,11 @@ sub readDWARFDump($$)
                 
                 if($Val=~/\A\(\w+\)\s*(-?)(\w+)\Z/)
                 { # (data1) 1c
-                    $Val = hex($2);
-                    if($1) {
-                        $Val = -$Val;
+                    if ($2 != 0xFFFFFFFFFFFFFFFF) {
+                        $Val = hex($2);
+                        if($1) {
+                            $Val = -$Val;
+                       }
                     }
                 }
                 else
