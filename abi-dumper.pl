@@ -757,7 +757,7 @@ sub readSymbols($)
         if(my ($Value, $Size, $Type, $Bind, $Vis, $Ndx, $Symbol) = readline_ELF($_))
         { # read ELF entry
             $Symbol_Bind{$Symbol} = $Bind;
-            if(index($Symbol, '@'))
+            if(index($Symbol, '@')!=-1)
             {
                 if($Symbol=~/\A(.+?)\@/) {
                     $Symbol_Bind{$1} = $Bind;
