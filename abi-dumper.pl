@@ -1,9 +1,9 @@
 #!/usr/bin/perl
 ###########################################################################
-# ABI Dumper 1.2
+# ABI Dumper 1.3
 # Dump ABI of an ELF object containing DWARF debug info
 #
-# Copyright (C) 2013-2020 Andrey Ponomarenko's ABI Laboratory
+# Copyright (C) 2013-2021 Andrey Ponomarenko's ABI Laboratory
 #
 # Written by Andrey Ponomarenko
 #
@@ -47,7 +47,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "1.2";
+my $TOOL_VERSION = "1.3";
 my $ABI_DUMP_VERSION = "3.5";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -93,7 +93,7 @@ my %ERROR_CODE = (
 
 my $ShortUsage = "ABI Dumper $TOOL_VERSION
 Dump ABI of an ELF object containing DWARF debug info
-Copyright (C) 2019 Andrey Ponomarenko's ABI Laboratory
+Copyright (C) 2021 Andrey Ponomarenko's ABI Laboratory
 License: GNU LGPL 2.1
 
 Usage: $CmdName [options] [object]
@@ -409,6 +409,7 @@ my %TypeType = (
     "subroutine_type"=>"Func",
     "array_type"=>"Array",
     "base_type"=>"Intrinsic",
+    "atomic_type"=>"Intrinsic",
     "unspecified_type"=>"Unspecified",
     "const_type"=>"Const",
     "pointer_type"=>"Pointer",
@@ -944,12 +945,25 @@ sub readAltInfo($)
                 if(/\A\s*(.+?)\Z/) {
                     $DirTable{keys(%DirTable)+1} = $1;
                 }
+                elsif(/\A\s*(\d+)\s+(.+?)\s+\(\d+\)\Z/)
+                { # F34
+                    $DirTable{$1} = $2;
+                }
             }
         }
         
-        if(/(\d+)\s+(\d+)\s+\d+\s+\d+\s+([^ ]+)/)
+        my ($Num, $Dir, $File) = ();
+        
+        if(/(\d+)\s+(\d+)\s+\d+\s+\d+\s+([^ ]+)/) {
+            ($Num, $Dir, $File) = ($1, $2, $3)
+        }
+        elsif(/(\d+)\s+([^ ]+)\s+\(\d+\)\,\s+(\d+)/)
+        {  # F34
+            ($Num, $File, $Dir) = ($1, $2, $3);
+        }
+        
+        if($File)
         {
-            my ($Num, $Dir, $File) = ($1, $2, $3);
             chomp($File);
             
             if(defined $AddDirs)
@@ -1181,8 +1195,12 @@ sub readDWARFInfo($)
             
             if(defined $DirTable_Def)
             {
-                if(/\A\s*(.+?)\Z/) {
+                if(/\A\s*([^\[\]\(\)]+?)\Z/) {
                     $DirTable{keys(%DirTable)+1} = $1;
+                }
+                elsif(/\A\s*(\d+)\s+(.+?)\s+\(\d+\)\Z/)
+                { # F34
+                    $DirTable{$1} = $2;
                 }
             }
         }
@@ -1191,21 +1209,32 @@ sub readDWARFInfo($)
         and /Table at offset (\w+)/) {
             $Offset = $1;
         }
-        elsif(defined $Offset
-        and /(\d+)\s+(\d+)\s+\d+\s+\d+\s+([^ ]+)/)
+        elsif(defined $Offset)
         {
-            my ($Num, $Dir, $File) = ($1, $2, $3);
-            chomp($File);
+            my ($Num, $Dir, $File) = ();
             
-            if(defined $AddDirs)
-            {
-                if(my $DName = $DirTable{$Dir})
-                {
-                    $File = $DName."/".$File;
-                }
+            if(/(\d+)\s+(\d+)\s+\d+\s+\d+\s+([^ ]+)/) {
+                ($Num, $Dir, $File) = ($1, $2, $3);
+            }
+            elsif(/(\d+)\s+([^ ]+)\s+\(\d+\)\,\s+(\d+)/)
+            { # F34
+                ($Num, $File, $Dir) = ($1, $2, $3);
             }
             
-            $SourceFile{$Offset}{$Num} = $File;
+            if($File)
+            {
+                chomp($File);
+                
+                if(defined $AddDirs)
+                {
+                    if(my $DName = $DirTable{$Dir})
+                    {
+                        $File = $DName."/".$File;
+                    }
+                }
+                
+                $SourceFile{$Offset}{$Num} = $File;
+            }
         }
     }
     close(SRC);
@@ -1226,6 +1255,8 @@ sub readDWARFInfo($)
         open(LOC, $EU_READELF_L." $AddOpt --debug-dump=loc \"$Path\" 2>\"$TMP_DIR/error\" |");
     }
     
+    my $Offset = undef;
+    
     while(<LOC>)
     {
         if(/\A \[\s*(\w+)\].*\[\s*\w+\]\s*(.+)\Z/) {
@@ -1233,6 +1264,14 @@ sub readDWARFInfo($)
         }
         elsif(/\A \[\s*(\w+)\]/) {
             $DebugLoc{$1} = "";
+        }
+        elsif(/Offset:\s+(.+?),/)
+        { # F34
+            $Offset = $1;
+        }
+        elsif($Offset and /\A\s+\[\s*\w+\]\s*(.+)\Z/)
+        { # F34
+            $DebugLoc{$Offset} = $1;
         }
     }
     close(LOC);
@@ -1613,7 +1652,7 @@ sub readDWARFDump($$)
                             $Val=~s/\A\"//;
                             $Val=~s/\"\Z//;
                             
-                            if($Val=~/GNU\s+(C\d*|C\+\+|GIMPLE)\s+(.+)\Z/)
+                            if($Val=~/GNU\s+(C\d*|C\+\+\d*|GIMPLE)\s+(.+)\Z/)
                             {
                                 $SYS_GCCV = $2;
                                 if($SYS_GCCV=~/\A(\d+\.\d+)(\.\d+|)/)
@@ -4280,9 +4319,12 @@ sub setSource(@)
     
     if(defined $File)
     {
+        my $InfoName = undef;
         if(index($File, "(")!=-1)
         { # Support for new elfutils (Fedora 30)
-            $File=~s/.+ \((\d+)\)/$1/;
+            if($File=~s/\A(.+?)\s+\((\d+)\)/$1/) {
+                $InfoName = $1;
+            }
         }
         
         my $Name = undef;
@@ -4293,6 +4335,10 @@ sub setSource(@)
         else
         { # imported
             $Name = $SourceFile_Alt{0}{$File};
+        }
+
+        if(not $Name) {
+            $Name = $InfoName;
         }
         
         if($Name=~/\.($HEADER_EXT)\Z/i
@@ -6513,7 +6559,7 @@ sub scenario()
     if($ShowVersion)
     {
         printMsg("INFO", "ABI Dumper $TOOL_VERSION");
-        printMsg("INFO", "Copyright (C) 2019 Andrey Ponomarenko's ABI Laboratory");
+        printMsg("INFO", "Copyright (C) 2021 Andrey Ponomarenko's ABI Laboratory");
         printMsg("INFO", "License: GNU LGPL 2.1 <http://www.gnu.org/licenses/>");
         printMsg("INFO", "This program is free software: you can redistribute it and/or modify it.\n");
         printMsg("INFO", "Written by Andrey Ponomarenko.");
