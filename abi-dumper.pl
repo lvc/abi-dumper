@@ -606,6 +606,8 @@ my %ELF_TYPE = map {$_=>1} (
 
 my %ELF_VIS = map {$_=>1} (
     "DEFAULT",
+    "INTERNAL",
+    "HIDDEN",
     "PROTECTED"
 );
 
