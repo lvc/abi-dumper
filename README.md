@@ -38,7 +38,7 @@ Install
 Usage
 -----
 
-Input objects should be compiled with `-g -Og` additional options to contain DWARF debug info.
+Input objects should be compiled with `-g -Og -fno-eliminate-unused-debug-types` additional options to contain DWARF debug info.
 
     abi-dumper libTest.so -o ABI.dump
     abi-dumper Module.ko.debug
