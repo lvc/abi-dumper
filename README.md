@@ -1,4 +1,4 @@
-ABI Dumper 1.3
+ABI Dumper 1.4
 ==============
 
 ABI Dumper — a tool to dump ABI of an ELF object containing DWARF debug info.

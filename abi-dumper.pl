@@ -3,7 +3,7 @@
 # ABI Dumper 1.3
 # Dump ABI of an ELF object containing DWARF debug info
 #
-# Copyright (C) 2013-2021 Andrey Ponomarenko's ABI Laboratory
+# Copyright (C) 2013-2025 Andrey Ponomarenko's ABI Laboratory
 #
 # Written by Andrey Ponomarenko
 #
@@ -48,7 +48,7 @@ use Cwd qw(abs_path cwd realpath);
 use Storable qw(dclone);
 use Data::Dumper;
 
-my $TOOL_VERSION = "1.3";
+my $TOOL_VERSION = "1.4";
 my $ABI_DUMP_VERSION = "3.5";
 my $ORIG_DIR = cwd();
 my $TMP_DIR = tempdir(CLEANUP=>1);
@@ -6725,7 +6725,7 @@ sub scenario()
     if($ShowVersion)
     {
         printMsg("INFO", "ABI Dumper $TOOL_VERSION EE");
-        printMsg("INFO", "Copyright (C) 2021 Andrey Ponomarenko's ABI Laboratory");
+        printMsg("INFO", "Copyright (C) 2025 Andrey Ponomarenko's ABI Laboratory");
         printMsg("INFO", "License: GNU LGPL 2.1 <http://www.gnu.org/licenses/>");
         printMsg("INFO", "This program is free software: you can redistribute it and/or modify it.\n");
         printMsg("INFO", "Written by Andrey Ponomarenko.");
