@@ -22,6 +22,7 @@
 #
 # COMPATIBILITY
 # =============
+#  ABI Viewer >= 1.0
 #  ABI Compliance Checker >= 2.2
 #
 # This library is free software; you can redistribute it and/or
@@ -70,7 +71,7 @@ $AddDirs, $VTDumperPath, $SymbolsListPath, $PublicHeadersPath,
 $IgnoreTagsPath, @CtagsDef, $KernelExport, $UseTU, $ReimplementStd,
 $IncludePreamble, $IncludePaths, $CacheHeaders, $MixedHeaders, $Debug,
 $SearchDirDebuginfo, $KeepRegsAndOffsets, $Quiet, $IncludeDefines,
-$AllUnits, $LambdaSupport, $LdLibraryPath);
+$AllUnits, $LambdaSupport, $LdLibraryPath, $ExtraDump);
 
 my $CmdName = getFilename($0);
 
@@ -91,9 +92,9 @@ my %ERROR_CODE = (
     "No_Exported"=>12
 );
 
-my $ShortUsage = "ABI Dumper $TOOL_VERSION
+my $ShortUsage = "ABI Dumper $TOOL_VERSION EE
 Dump ABI of an ELF object containing DWARF debug info
-Copyright (C) 2021 Andrey Ponomarenko's ABI Laboratory
+Copyright (C) 2025 Andrey Ponomarenko's ABI Laboratory
 License: GNU LGPL 2.1
 
 Usage: $CmdName [options] [object]
@@ -150,6 +151,7 @@ GetOptions("h|help!" => \$Help,
   "ld-library-path=s" => \$LdLibraryPath,
 # internal options
   "addr2name!" => \$AddrToName,
+  "extra-dump!" => \$ExtraDump,
 # obsolete
   "reimplement-std!" => \$ReimplementStd
 ) or errMsg();
@@ -162,14 +164,14 @@ sub errMsg()
 
 my $HelpMessage="
 NAME:
-  ABI Dumper ($CmdName)
+  ABI Dumper EE ($CmdName)
   Dump ABI of an ELF object containing DWARF debug info
 
 DESCRIPTION:
   ABI Dumper is a tool for dumping ABI information of an ELF object
   containing DWARF debug info.
   
-  The tool is intended to be used with ABI Compliance Checker tool for
+  The tool is intended to be used with ABI Viewer or ABICC tool for
   tracking ABI changes of a C/C++ library or kernel module.
 
   This tool is free software: you can redistribute it and/or modify it
@@ -449,11 +451,18 @@ my %Library_Needed;
 my %SymbolTable;
 my %Symbol_Bind;
 
+# Extra Dump
+my %SymbolAttribute;
+my $GLOBAL_ID_T = 0;
+my %FullLoc = ();
+
 # Kernel
 my %KSymTab;
 
 # VTables
 my %VirtualTable;
+my %VTable_Symbol;
+my %VTable_Class;
 
 # Env
 my $SYS_ARCH;
@@ -809,6 +818,18 @@ sub readSymbols($)
             {
                 $Symbol_Value{$Symbol} = $Value;
                 $Value_Symbol{$Value}{$Symbol} = 1;
+
+                if(defined $ExtraDump)
+                {
+                    $SymbolAttribute{$Symbol} = {
+                        "Val" => $Value,
+                        "Size" => $Size,
+                        "Kind" => $Type,
+                        "Bind" => $Bind,
+                        "Vis" => $Vis,
+                        "Ndx" => $Ndx
+                    };
+                }
             }
             
             if(not $symtab)
@@ -1522,11 +1543,21 @@ sub readDWARFDump($$)
             {
                 if($Val=~/\)\s*\Z/)
                 { # value on the next line
-                    $Val .= <$FH>;
+                    my $NL = <$FH>;
+                    $Val .= $NL;
+
+                    if(defined $ExtraDump)
+                    {
+                        if($NL=~/\A\s{4,}\[\s*(\w+)\]\s*(piece \d+|\w+)/)
+                        {
+                            $FullLoc{$ID}{$1} = $2;
+                        }
+                    }
                     
                     if(index($Val, "GNU_entry_value")!=-1)
                     { # value on the next line
-                        $Val .= <$FH>;
+                        $NL = <$FH>;
+                        $Val .= $NL;
                     }
                 }
                 
@@ -1716,6 +1747,10 @@ sub readDWARFDump($$)
                     $Partial = 1;
                 }
             }
+        }
+        elsif(defined $ExtraDump and $Line=~/\A\s{4,}\[\s*(\w+)\]\s*(piece \d+|\w+)/)
+        {
+            $FullLoc{$ID}{$1} = $2;
         }
         elsif($Line=~/\A \[\s*(\w+)\](\s*)(\w+)/)
         {
@@ -1982,6 +2017,15 @@ sub readVtables($)
                         $VirtualTable{$CName}{$1} = $2;
                     }
                 }
+
+                if(defined $ExtraDump)
+                {
+                    if($Entries[0]=~/\A(\w+)\:/)
+                    {
+                        $VTable_Symbol{$CName} = $1;
+                        $VTable_Class{$1} = $CName;
+                    }
+                }
             }
         }
     }
@@ -1994,7 +2038,14 @@ sub readVtables($)
             {
                 my $TName = $TypeInfo{$Tid}{"Name"};
                 $TName=~s/\bstruct //g;
-                if(defined $VirtualTable{$TName}) {
+                if(defined $VirtualTable{$TName})
+                {
+                    $TypeInfo{$Tid}{"VTable"} = $VirtualTable{$TName};
+
+                    if(defined $ExtraDump)
+                    {
+                        $TypeInfo{$Tid}{"VTable_Sym"} = $VTable_Symbol{$TName};
+                    }
                     $TypeInfo{$Tid}{"VTable"} = $VirtualTable{$TName};
                 }
             }
@@ -2063,7 +2114,11 @@ sub createABIFile()
     else {
         $ABI{"Compiler"} = $SYS_COMP;
     }
-    
+
+    if(defined $ExtraDump) {
+        $ABI{"ExtraDump"} = "On";
+    }
+
     if(defined $PublicHeadersPath) {
         $ABI{"PublicABI"} = "1";
     }
@@ -2574,6 +2629,14 @@ sub selectSymbols()
         $SelectedSymbols{$ID} = $S;
         
         delete($SymbolInfo{$ID}{"External"});
+
+        # add attributes
+        if(defined $ExtraDump)
+        {
+            foreach my $Attr (keys(%{$SymbolAttribute{$Symbol}})) {
+                $SymbolInfo{$ID}{$Attr} = $SymbolAttribute{$Symbol}{$Attr};
+            }
+        }
     }
 }
 
@@ -2890,7 +2953,10 @@ sub completeABI()
             if(not defined $SInfo->{"Param"}
             or $SInfo->{"Param"}{0}{"name"} ne "this")
             {
-                $SInfo->{"Static"} = 1;
+                if(not $ExtraDump or index($Symbol, "_ZTV")!=0)
+                {
+                    $SInfo->{"Static"} = 1;
+                }
             }
         }
         
@@ -3067,7 +3133,15 @@ sub selectPublicType($)
 sub selectPublic($$)
 {
     my ($Symbol, $ID) = @_;
-    
+
+    if($ExtraDump)
+    {
+        if(index($Symbol, "_ZTV")==0)
+        {
+            return 1;
+        }
+    }
+
     my $Header = getFilename($SymbolInfo{$ID}{"Header"});
     
     if($OBJ_LANG eq "C++") {
@@ -3105,6 +3179,49 @@ sub selectPublic($$)
     }
     
     return 1;
+}
+
+sub add_VtableSymbols()
+{
+    foreach my $Symbol (sort {lc($a) cmp lc($b)} keys(%VTable_Class))
+    {
+        my $CName = $VTable_Class{$Symbol};
+        my $ID = ++$GLOBAL_ID;
+
+        $SymbolInfo{$ID}{"MnglName"} = $Symbol;
+
+        # TODO: move VTable attr from TypeInfo to SymbolInfo
+
+        if(not defined $TName_Tid{"Class"}{$CName}
+        and not defined $TName_Tid{"Struct"}{$CName})
+        { # create class
+            my $ID_T = ++$GLOBAL_ID_T;
+
+            $TName_Tid{"Class"}{$CName} = $ID_T;
+
+            $TypeInfo{$ID_T}{"Type"} = "Class";
+            $TypeInfo{$ID_T}{"Name"} = $CName;
+
+            if($CName=~/\A([\w\:]+)\:\:/) {
+                $TypeInfo{$ID_T}{"NameSpace"} = $1;
+            }
+
+            if(defined $VirtualTable{$CName}) {
+                %{$TypeInfo{$ID_T}{"VTable"}} = %{$VirtualTable{$CName}};
+            }
+        }
+
+        if(defined $TName_Tid{"Class"}{$CName}) {
+            $SymbolInfo{$ID}{"Class"} = $TName_Tid{"Class"}{$CName};
+        }
+        elsif(defined $TName_Tid{"Struct"}{$CName}) {
+            $SymbolInfo{$ID}{"Class"} = $TName_Tid{"Struct"}{$CName};
+        }
+
+        foreach my $Attr (keys(%{$SymbolAttribute{$Symbol}})) {
+            $SymbolInfo{$ID}{$Attr} = $SymbolAttribute{$Symbol}{$Attr};
+        }
+    }
 }
 
 sub cloneSymbol($$)
@@ -4198,7 +4315,14 @@ sub getTypeInfo($)
         
         $TypeSpec{$ID} = $BASE_ID;
     }
-    
+
+    if(defined $ExtraDump)
+    {
+        if($ID>$GLOBAL_ID_T) {
+            $GLOBAL_ID_T = $ID;
+        }
+    }
+
     # remove duplicates
     my $DId = undef;
     
@@ -4974,7 +5098,7 @@ sub getSymbolInfo($)
     {
         my $ParamId = $FuncParam{$ID}{$Pos};
         my $Offset = undef;
-        my $Reg = undef;
+        my %Regs = ();
         
         if(my $Sp = $SpecElem{$ID})
         {
@@ -4986,15 +5110,12 @@ sub getSymbolInfo($)
         if((my $Loc = $DWARF_Info{$ParamId}{"location"}) ne "") {
             $Offset = $Loc;
         }
-        elsif((my $R = $DWARF_Info{$ParamId}{"register"}) ne "") {
-            $Reg = $RegName{$R};
-        }
         elsif((my $LL = $DWARF_Info{$ParamId}{"location_list"}) ne "")
         {
             if(my $L = $DebugLoc{$LL})
             {
                 if($L=~/reg(\d+)/) {
-                    $Reg = $RegName{$1};
+                    $Regs{0} = $RegName{$1};
                 }
                 elsif($L=~/fbreg\s+(-?\w+)\Z/) {
                     $Offset = $1;
@@ -5008,6 +5129,35 @@ sub getSymbolInfo($)
                     $InvalidDebugLoc = 1;
                 }
             }
+        }
+        elsif(defined $ExtraDump)
+        {
+            my $Piece = 0;
+            foreach my $P (sort {int($a)<=>int($b)} keys(%{$FullLoc{$ParamId}}))
+            {
+                my $L = $FullLoc{$ParamId}{$P};
+
+                if($L=~/piece (\d+)/) {
+                    $Piece = $1;
+                }
+                elsif($L=~/stack_value/)
+                {
+                    # Nothing to do
+                }
+                elsif($L=~/reg(\d+)/)
+                {
+                    $Regs{$Piece} = $RegName{$1};
+                }
+                else
+                {
+                    # Error
+                }
+            }
+        }
+        elsif(defined $DWARF_Info{$ParamId}{"register"})
+        {
+            my $R = $DWARF_Info{$ParamId}{"register"};
+            $Regs{0} = $RegName{$R};
         }
         
         if(my $OrigP = $DWARF_Info{$ParamId}{"orig"}) {
@@ -5062,10 +5212,26 @@ sub getSymbolInfo($)
             $SInfo{"Param"}{$Pos}{"name"} = "p".($PPos+1);
         }
         
-        if(defined $Reg
+        if(my @R = keys(%Regs)
         and not defined $IncompatibleOpt)
         {
-            $SInfo{"Reg"}{$Pos} = $Reg;
+            if(defined $ExtraDump)
+            {
+                # FIXME: 0+8, 1+16, etc. (for partially distributed parameters)
+                foreach my $RP (@R)
+                {
+                    my $O = $Pos;
+                    if($RP) {
+                        $O .= "+".$RP;
+                    }
+
+                    $SInfo{"Reg"}{$O} = $Regs{$RP};
+                }
+            }
+            else
+            {
+                $SInfo{"Reg"}{$Pos} = $Regs{$R[0]};
+            }
         }
         
         if($DWARF_Info{$ParamId}{"art"} and $Pos==0)
@@ -6558,7 +6724,7 @@ sub scenario()
     }
     if($ShowVersion)
     {
-        printMsg("INFO", "ABI Dumper $TOOL_VERSION");
+        printMsg("INFO", "ABI Dumper $TOOL_VERSION EE");
         printMsg("INFO", "Copyright (C) 2021 Andrey Ponomarenko's ABI Laboratory");
         printMsg("INFO", "License: GNU LGPL 2.1 <http://www.gnu.org/licenses/>");
         printMsg("INFO", "This program is free software: you can redistribute it and/or modify it.\n");
@@ -6765,7 +6931,15 @@ sub scenario()
     if(not $Res) {
         exitStatus("No_DWARF", "can't find debug info in object(s)");
     }
-    
+
+    if(defined $ExtraDump)
+    { # add v-table symbols
+        add_VtableSymbols();
+    }
+
+    %VTable_Symbol = ();
+    %VTable_Class = ();
+
     %VirtualTable = ();
     
     completeABI();
@@ -6831,7 +7005,9 @@ sub scenario()
     %TName_Tid = ();
     %TName_Tids = ();
     %SymbolTable = ();
-    
+
+    %SymbolAttribute = ();
+
     %NameSpace = ();
     
     %DeletedAnon = ();
