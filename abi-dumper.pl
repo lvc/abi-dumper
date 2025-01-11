@@ -1088,6 +1088,11 @@ sub readDWARFInfo($)
             if($Found and $Found ne $Path)
             {
                 printMsg("INFO", "Reading debug-info file $DName linked from gnu_debuglink");
+                printMsg("INFO", "$Found.dwp");
+                if (-f $Found.".dwp"){
+                    printMsg("INFO", "Reading debug-info from file $Found.dwp");
+                    readDWARFInfo($Found.".dwp");
+                }
                 return readDWARFInfo($Found);
             }
             else
