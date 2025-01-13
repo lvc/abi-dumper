@@ -4464,6 +4464,10 @@ sub setSource(@)
         if(not $Name) {
             $Name = $InfoName;
         }
+
+        if(index($Name, "<built-in>")!=-1) {
+            return;
+        }
         
         if($Name=~/\.($HEADER_EXT)\Z/i
         or index($Name, ".")==-1)
@@ -4482,7 +4486,7 @@ sub setSource(@)
                 }
             }
         }
-        elsif(index($Name, "<built-in>")==-1)
+        else
         { # source
             if(not defined $Target or $Target eq "Source")
             {
